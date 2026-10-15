@@ -12,24 +12,32 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 | [DT-001](#dt-001-no-versionar-el-dataset-original) | No versionar el dataset original | Repositorio / Seguridad | Aceptada |
 | [DT-002](#dt-002-template-de-variables-de-entorno) | Template de variables de entorno | Repositorio / Seguridad | Aceptada |
 | [DT-003](#dt-003-bronze-como-copia-fiel-de-la-fuente) | Bronze como copia fiel de la fuente | Bronze | Aceptada |
-| [DT-004](#dt-004-tratamiento-de-operaciones-en-días-inhábiles) | Tratamiento de operaciones en días inhábiles | Calidad / Silver | Propuesta |
-| [DT-005](#dt-005-identificación-de-variantes-de-liquidación-mep--cable) | Identificación de variantes de liquidación (MEP / Cable) | Calidad / Enriquecimiento | Propuesta |
-| [DT-006](#dt-006-detección-de-montos-y-precios-extremos) | Detección de montos y precios extremos | Calidad | Propuesta |
+| [DT-004](#dt-004-tratamiento-de-operaciones-en-días-inhábiles) | Tratamiento de operaciones en días inhábiles | Calidad / Silver | Aceptada |
+| [DT-005](#dt-005-identificación-de-variantes-de-liquidación-mep--cable) | Identificación de variantes de liquidación (MEP / Cable) | Calidad / Enriquecimiento | Aceptada |
+| [DT-006](#dt-006-detección-de-montos-y-precios-extremos) | Detección de montos y precios extremos | Calidad | Aceptada |
 | [DT-007](#dt-007-segmentación-de-clientes-ante-distribución-asimétrica) | Segmentación de clientes ante distribución asimétrica | Gold | Propuesta |
 | [DT-008](#dt-008-schema-landing-propio-para-archivos-crudos) | Schema `landing` propio para archivos crudos | Arquitectura | Aceptada |
 | [DT-009](#dt-009-notebooks-como-disparadores-lógica-en-src) | Notebooks como disparadores, lógica en `src/` | Arquitectura / Testing | Aceptada |
 | [DT-010](#dt-010-orquestación-con-notebook-en-lugar-de-databricks-jobs) | Orquestación con notebook en lugar de Databricks Jobs | Orquestación | Aceptada |
+| [DT-011](#dt-011-clasificación-de-instrumentos-por-reglas) | Clasificación de instrumentos por reglas | Silver | Aceptada |
+| [DT-012](#dt-012-silver-se-reconstruye-completo-en-cada-corrida) | Silver se reconstruye completo en cada corrida | Silver / Escalabilidad | Aceptada |
+| [DT-013](#dt-013-outputs-públicos-sin-datos-a-nivel-registro) | Outputs públicos sin datos a nivel registro | Seguridad | Aceptada |
+| [DT-014](#dt-014-registro-declarativo-de-reglas-de-calidad) | Registro declarativo de reglas de calidad | Calidad | Aceptada |
 
 ## Pendientes
 
 - [ ] Escribir el `README.md`: diagrama de arquitectura, instrucciones de reproducción, decisiones con tradeoffs (enlazando este documento), tabla de cobertura de cotizaciones por símbolo y documentación del componente de IA.
 - [x] Definir el mecanismo de idempotencia de la ingesta a Bronze: Auto Loader (DT-003).
 - [x] Definir la ruta del volumen de Unity Catalog donde se aloja el CSV (DT-008).
-- [ ] Calibrar el umbral N de desvío de precio contra la mediana (DT-006).
+- [x] Calibrar el umbral N de desvío de precio contra la mediana (DT-006): N = 10.
 - [ ] Evaluar si se versiona una muestra ofuscada del dataset (DT-001).
 - [ ] Activar "Commit notebook outputs" en el Git folder de Databricks.
 - [ ] Ejecutar setup y notebooks en Databricks y commitear los `.ipynb` con outputs.
 - [ ] Documentar en arquitectura el Job productivo equivalente al orquestador (DT-010).
+- [ ] Consultar a IOL si `fecha` está realmente en UTC (las horas cubren las 24 hs) (DT-004).
+- [ ] Confirmar el horario de mercado de BYMA contra la fuente oficial (hoy 11:00 a 17:00 ART en `MARKET_OPEN_HOUR` / `MARKET_CLOSE_HOUR`), incluyendo preapertura y diferencias por segmento (DT-004).
+- [ ] Extender `FERIADOS_AR` si se procesan períodos fuera de ene-mar 2026 (DT-004).
+- [ ] Clasificar con IA los instrumentos que caen en `ACCION` por descarte (DT-011, Task 07).
 
 ---
 
@@ -89,50 +97,70 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 
 ## DT-004: Tratamiento de operaciones en días inhábiles
 
-- **Estado:** Propuesta
+- **Estado:** Aceptada
 - **Fecha:** 2026-10-15
 
 **Contexto (perfilado).**
-- 12.498 operaciones (12,5%) caen en **sábado**, todos los sábados del período. No hay operaciones en domingo ni en los feriados (01/01, 16/02 y 17/02).
-- Las horas UTC cubren las 24 horas del día, aunque el horario de BYMA es de 11 a 17 ART (14 a 20 UTC). Los sábados la actividad va de 00 a 19 UTC y los lunes empieza a las 10 UTC.
-- Interpretación: son órdenes cargadas fuera del horario de mercado por canales 24/7, que se ejecutan en la siguiente rueda.
+- 12.498 operaciones caen en **sábado** UTC, todos los sábados del período. No hay operaciones en domingo ni en los feriados (01/01, 16/02 y 17/02).
+- Las horas UTC cubren las 24 horas del día, aunque el horario de BYMA es de 11 a 17 ART. Solo el **27,6%** de las operaciones ocurre en día hábil y dentro del horario de mercado.
+- Interpretación: son órdenes cargadas en canales 24/7, que se ejecutan en la siguiente rueda.
 
-**Decisión propuesta.** Conservar el `fecha` original y derivar `fecha_operativa`, que corresponde al siguiente día hábil según un calendario de feriados argentinos (`dim_calendario`), junto con el flag `es_dia_inhabil`. Para el enriquecimiento con cotizaciones se usa `fecha_operativa`.
+**Decisión.**
+- `fecha` se toma como UTC, tal como indica la fuente (`Z`). Se derivan `fecha_hora_local` y `fecha_local` en `America/Argentina/Buenos_Aires`, porque el mercado es argentino. En hora local, las operaciones en día inhábil son 10.255.
+- `fecha_operativa` = `fecha_local` si es hábil; si no, el **siguiente día hábil**. Las cotizaciones (Task 04) se buscan por `fecha_operativa`.
+- Flag `DIA_INHABIL` en `dq_flags`; la fila no se descarta.
+- `en_horario_mercado` es un atributo informativo, **no un flag**: operar fuera de horario es el comportamiento normal del 62% de las órdenes y no indica un problema de calidad. Las órdenes fuera de horario en día hábil **no** se mueven al día siguiente, para no imputar sobre un supuesto no confirmado.
+- Los feriados viven en `FERIADOS_AR` (`src/iol_pipeline/silver.py`), que es la única fuente de verdad, y se publican en `silver.ref_feriados`. Cubren el período del dataset.
 
 **Alternativas consideradas.**
 - *Descartar operaciones de sábado:* viola el requisito de trazabilidad.
 - *Usar el último cierre anterior:* para una orden cargada fuera de horario, el precio relevante es el de la próxima rueda.
+- *Calcular días inhábiles sobre la fecha UTC:* clasificaría como sábado operaciones del viernes por la noche en Argentina.
+
+**Consecuencias.** Si IOL confirma que `fecha` no está en UTC, solo cambia la derivación de `fecha_hora_local` (una línea). El calendario hay que extenderlo para procesar otros períodos.
 
 ---
 
 ## DT-005: Identificación de variantes de liquidación (MEP / Cable)
 
-- **Estado:** Propuesta
+- **Estado:** Aceptada (revisa la propuesta original)
 - **Fecha:** 2026-10-15
 
 **Contexto (perfilado).**
-- El 100% de las operaciones en USD usa símbolos con sufijo `D` (MEP) o `C` (Cable), como `AL30D`/`AL30C` o `AAPLD`/`AAPLC`.
-- Hay **falsos positivos**: 4.648 operaciones en ARS con tickers reales que terminan en D o C (`YPFD`, `GLD`, `AMD`, `INTC`, `LAC`, `JD`, `MCD`, `HOOD`).
-- Hay casos irregulares, como `BA.C`, `BA.CD` y `BA7DC`.
+- Todos los símbolos en USD (471) terminan en `D` (441, MEP) o en `C` (30, Cable).
+- Ningún símbolo en ARS es una variante: los que terminan en D o C (`YPFD`, `GLD`, `AMD`, `INTC`) son tickers reales.
+- La propuesta original exigía que el ticker base existiera en el dataset, pero **falla en el 41% de los casos**: 192 variantes en USD no tienen su base operada en ARS en el período (por ejemplo `BA7DD`, `BPA8C`, `CS38D`).
 
-**Decisión propuesta.** Una regla compuesta: se considera variante solo si `moneda = 'USD'`, el símbolo termina en `D` o `C` y el ticker base existe en el dataset. Los casos que no resuelve la regla se cargan en una tabla de mapeo explícita (`ref_simbolo_variante`). Se obtienen `simbolo_base` y `tipo_liquidacion` (`ARS`, `MEP`, `CABLE`).
+**Decisión.** La moneda es el discriminador. Si `moneda = 'USD'`, la operación es una variante: sufijo `D` → `MEP`, `C` → `CABLE` y `simbolo_base` = el símbolo sin el último carácter. En ARS, `tipo_liquidacion = 'ARS'` y `simbolo_base = simbolo`. La existencia de la base en el dataset se reporta como métrica de cobertura, no como condición.
 
 **Alternativas consideradas.**
 - *Solo por sufijo:* clasificaría mal tickers como YPFD o GLD.
-- *Solo por moneda:* no distingue MEP de Cable.
+- *Sufijo + base existente en el dataset (propuesta original):* deja sin clasificar el 41% de las variantes.
+- *Tabla de mapeo manual:* no hace falta, porque la regla por moneda no tiene excepciones en los datos.
+
+**Consecuencias.** Un símbolo en USD sin sufijo D/C se clasificaría como `USD_OTRO`. Hoy no hay ninguno, y el caso queda visible en el notebook.
 
 ---
 
 ## DT-006: Detección de montos y precios extremos
 
-- **Estado:** Propuesta
+- **Estado:** Aceptada
 - **Fecha:** 2026-10-15
 
 **Contexto (perfilado).**
 - **Precios placeholder:** valores de `0.01` o cercanos a `1.00` en instrumentos con medianas muy superiores (`AL30` tiene mediana de 876 y mínimo de 0.01; también `SATL`, `TGNO4`, `METR`).
-- **Montos extremos legítimos:** el cliente `CLI74090760` opera letras por más de 1.000M de nominales (hasta 1.470M de ARS). Las letras y bonos cotizan por valor nominal (precio ≈ 1), así que un umbral global de cantidad o precio no sirve.
+- **Opciones** (`GFGC...`, `GFGV...`): sus precios varían hasta 50 veces en el trimestre de forma legítima, por su volatilidad.
+- **Montos extremos legítimos:** un único cliente opera letras por más de 1.000M de nominales. Las letras y bonos cotizan por valor nominal (precio ≈ 1), así que un umbral global de cantidad o precio no sirve.
 
-**Decisión propuesta.** Reglas **relativas por `simbolo_titulo` + `moneda`** y no globales: el flag `precio_fuera_de_rango` se activa si el precio se desvía más de N veces de la mediana del símbolo (N a calibrar). Los montos extremos se marcan con `monto_extremo` por percentil dentro del tipo de instrumento, sin excluirse. Todos los flags se aplican en Silver (DT-003).
+**Decisión.**
+- `PRECIO_FUERA_DE_RANGO`: el desvío simétrico `max(p/mediana, mediana/p)` es mayor a **N = 10**, contra la mediana del símbolo y moneda en todo el histórico (`precio_referencia`). Se exigen al menos 5 operaciones del símbolo y no se aplica a opciones.
+- **Calibración de N:** sin opciones, los 8 casos con desvío mayor a 100x son todos placeholders, y los movimientos reales no superan 3,6x. **No hay ningún caso entre 3,6x y 100x**, así que N = 10 cae en el medio de ese hueco natural. Marca 8 filas.
+- `MONTO_EXTREMO`: monto por encima del **p99.9 de su tipo de instrumento**. Marca 104 filas. Es informativo, porque son operaciones legítimas que distorsionan promedios.
+- Ninguna fila se descarta. Gold decide qué filas usa según `dq_flags`.
+
+**Alternativas consideradas.**
+- *Umbral global de precio o cantidad:* no sirve, por las distintas escalas entre letras, bonos y acciones.
+- *Z-score o IQR:* asumen una distribución que los precios de un trimestre no cumplen, y son sensibles a los mismos outliers que buscan detectar. La mediana es robusta.
 
 ---
 
@@ -198,6 +226,77 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - *`%run`:* comparte variables entre notebooks (acoplamiento) y no devuelve un resultado.
 
 **Consecuencias.** No hay schedule, reintentos automáticos ni paralelismo entre pasos; la ejecución es manual.
+
+---
+
+## DT-011: Clasificación de instrumentos por reglas
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-15
+
+**Contexto.** El dataset no trae el tipo de instrumento. La descripción lo sugiere ("Cedear ...", "Bono ...", "Letra ..."), pero hay variaciones de mayúsculas, typos ("CEDEARV") y descripciones que son el propio ticker (opciones como `GFGC79054F`).
+
+**Decisión.** Reglas evaluadas en orden (`INSTRUMENT_RULES` en `silver.py`), con regex sobre el símbolo o sobre la descripción normalizada. La primera que matchea define el tipo: `OPCION`, `CEDEAR`, `BONO`, `ON`, `LETRA`, `WARRANT`. Después, palabras clave para deuda sin prefijo (`CLASE`/`REGS` → ON; `VTO`, `%`, `TITULOS DE DEUDA`, `CUPÓN` → BONO). Lo que no matchea se clasifica como `ACCION`. Las reglas están declaradas como datos: la versión Python (tests) y la expresión Spark se generan de la misma lista.
+
+**Resultado:** CEDEAR 54,0% · BONO 19,0% · ACCION 18,2% · LETRA 4,1% · ON 2,6% · OPCION 2,2% · WARRANT 0,1%.
+
+**Alternativas consideradas.**
+- *Tabla de mapeo manual por símbolo:* es más precisa, pero con 1.445 símbolos no es mantenible.
+- *Fuente externa de metadatos:* se evaluará junto con la API de cotizaciones (Task 04).
+
+**Consecuencias.** `ACCION` es una categoría por descarte: puede contener instrumentos de deuda con descripciones atípicas. Es el candidato natural para la integración con IA (Task 07).
+
+---
+
+## DT-012: Silver se reconstruye completo en cada corrida
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-15
+
+**Contexto.** Las reglas de calidad usan referencias sobre todo el histórico: la mediana de precio por símbolo y el p99.9 de monto por tipo de instrumento. Con 100.000 filas, procesar todo tarda segundos.
+
+**Decisión.** Cada corrida recalcula Silver completo desde Bronze y sobrescribe la tabla con `writeTo(...).overwrite(...)`, que conserva el DDL, los comentarios y las propiedades. Es idempotente por diseño: el mismo Bronze produce el mismo Silver. El notebook valida el balance `bronze = silver + duplicados` y que no haya fechas sin calendario.
+
+**Alternativas consideradas.**
+- *Incremental con `MERGE` por `id_transaccion`:* escala mejor, pero las medianas y percentiles incrementales requieren mantener estado aparte y recalcular flags de filas viejas cuando cambia la referencia. Es complejidad que hoy no se justifica.
+
+**Estrategia de escalabilidad.** Si el volumen crece (por ejemplo, años de historia con archivos diarios), Silver pasaría a ser incremental: leer de Bronze solo lo nuevo con Change Data Feed (ya habilitado), aplicar `MERGE` por `id_transaccion`, y recalcular las referencias estadísticas en una tabla aparte, con una ventana móvil, por ejemplo de 90 días.
+
+---
+
+## DT-013: Outputs públicos sin datos a nivel registro
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-15
+
+**Contexto.** Los notebooks se publican con outputs en un repo público, y la consigna prohíbe subir los datos originales.
+
+**Decisión.** Los outputs de los notebooks muestran **agregados** (conteos, porcentajes, detalle por símbolo), nunca filas con `id_cliente` o `id_transaccion`. Antes de cada commit con outputs se verifica que no aparezcan identificadores con los patrones `CLI…` y `TXN…`.
+
+**Consecuencias.** Para inspeccionar registros individuales se consulta la tabla directamente en Databricks, fuera de los notebooks versionados.
+
+---
+
+## DT-014: Registro declarativo de reglas de calidad
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-15
+
+**Contexto.** Las reglas de calidad de Silver estaban escritas a mano dentro de la transformación: agregar una regla implicaba tocar la lógica en varios lugares, y no había forma de listar qué se valida sin leer el código.
+
+**Decisión.** Las reglas se declaran como datos en `DQ_RULES` (`src/iol_pipeline/silver.py`). Cada `DQRule` es inmutable (`frozen=True`) y tiene `name`, `description`, `condition` (expresión SQL: TRUE = la fila tiene el problema) y `severity` (`WARN` o `ERROR`). `apply_dq_rules()` genera `dq_flags` y `dq_status` a partir de la lista:
+- Una condición que evalúa a `NULL` no marca la fila: solo se marca lo que se puede afirmar.
+- `dq_status` es la peor severidad: `OK` sin flags, `WARN`, o `ERROR` si algún flag es de severidad `ERROR`.
+- Los umbrales (`PRICE_DEVIATION_THRESHOLD`, etc.) se interpolan en las condiciones, así no hay números duplicados.
+- El notebook publica el catálogo (regla, descripción, severidad, condición, filas marcadas), así se puede saber qué se valida sin leer el código (Task 05).
+
+Hoy las tres reglas son `WARN`. `ERROR` queda disponible para controles que deban excluir filas de Gold.
+
+**Alternativas consideradas.**
+- *Condiciones como expresiones `Column` de PySpark:* son más seguras en tipos, pero no se pueden mostrar como texto ni persistir en una tabla.
+- *Framework externo (Great Expectations, DQX):* agrega una dependencia para tres reglas. Delta Live Tables, que tiene *expectations* nativas, está prohibido por la consigna.
+
+**Consecuencias.** Las condiciones son strings SQL, y los tests sin Spark solo validan su estructura (nombres únicos, severidad válida, umbrales reflejados). Su ejecución se testea con PySpark local, en tests que se saltean si PySpark no está instalado.
 
 ---
 
