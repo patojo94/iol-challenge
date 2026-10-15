@@ -1,3 +1,10 @@
 .env
 demo-data
 challenge-iol-de-sr.pdf
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
