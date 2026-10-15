@@ -17,6 +17,7 @@ class PipelineConfig:
     bronze_schema: str = "bronze"
     checkpoints_volume: str = "checkpoints"
     silver_schema: str = "silver"
+    gold_schema: str = "gold"
 
     # --- Landing -------------------------------------------------------------
     def landing_path(self, source: str) -> str:
@@ -37,3 +38,7 @@ class PipelineConfig:
     # --- Silver --------------------------------------------------------------
     def silver_table(self, name: str) -> str:
         return f"{self.catalog}.{self.silver_schema}.{name}"
+
+    # --- Gold ----------------------------------------------------------------
+    def gold_table(self, name: str) -> str:
+        return f"{self.catalog}.{self.gold_schema}.{name}"
