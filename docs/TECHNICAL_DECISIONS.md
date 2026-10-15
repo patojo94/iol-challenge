@@ -15,7 +15,7 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 | [DT-004](#dt-004-tratamiento-de-operaciones-en-días-inhábiles) | Tratamiento de operaciones en días inhábiles | Calidad / Silver | Aceptada |
 | [DT-005](#dt-005-identificación-de-variantes-de-liquidación-mep--cable) | Identificación de variantes de liquidación (MEP / Cable) | Calidad / Enriquecimiento | Aceptada |
 | [DT-006](#dt-006-detección-de-montos-y-precios-extremos) | Detección de montos y precios extremos | Calidad | Aceptada |
-| [DT-007](#dt-007-segmentación-de-clientes-ante-distribución-asimétrica) | Segmentación de clientes ante distribución asimétrica | Gold | Propuesta |
+| [DT-007](#dt-007-segmentación-de-clientes-ante-distribución-asimétrica) | Segmentación de clientes ante distribución asimétrica | Gold | Aceptada |
 | [DT-008](#dt-008-schema-landing-propio-para-archivos-crudos) | Schema `landing` propio para archivos crudos | Arquitectura | Aceptada |
 | [DT-009](#dt-009-notebooks-como-disparadores-lógica-en-src) | Notebooks como disparadores, lógica en `src/` | Arquitectura / Testing | Aceptada |
 | [DT-010](#dt-010-orquestación-con-notebook-en-lugar-de-databricks-jobs) | Orquestación con notebook en lugar de Databricks Jobs | Orquestación | Aceptada |
@@ -23,6 +23,8 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 | [DT-012](#dt-012-silver-se-reconstruye-completo-en-cada-corrida) | Silver se reconstruye completo en cada corrida | Silver / Escalabilidad | Aceptada |
 | [DT-013](#dt-013-outputs-públicos-sin-datos-a-nivel-registro) | Outputs públicos sin datos a nivel registro | Seguridad | Aceptada |
 | [DT-014](#dt-014-registro-declarativo-de-reglas-de-calidad) | Registro declarativo de reglas de calidad | Calidad | Aceptada |
+| [DT-015](#dt-015-modelo-en-estrella-con-claves-subrogadas-deterministas) | Modelo en estrella con claves subrogadas deterministas | Gold | Aceptada |
+| [DT-016](#dt-016-scd-tipo-2-en-dim_cliente-con-cortes-mensuales) | SCD Tipo 2 en `dim_cliente` con cortes mensuales | Gold | Aceptada |
 
 ## Pendientes
 
@@ -37,6 +39,7 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - [ ] Consultar a IOL si `fecha` está realmente en UTC (las horas cubren las 24 hs) (DT-004).
 - [ ] Confirmar el horario de mercado de BYMA contra la fuente oficial (hoy 11:00 a 17:00 ART en `MARKET_OPEN_HOUR` / `MARKET_CLOSE_HOUR`), incluyendo preapertura y diferencias por segmento (DT-004).
 - [ ] Extender `FERIADOS_AR` si se procesan períodos fuera de ene-mar 2026 (DT-004).
+- [ ] Preguntar a IOL si puede compartir un maestro de clientes (perfil de inversor, fecha de alta) para sumar atributos a `dim_cliente` (DT-007).
 - [ ] Clasificar con IA los instrumentos que caen en `ACCION` por descarte (DT-011, Task 07).
 
 ---
@@ -166,12 +169,27 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 
 ## DT-007: Segmentación de clientes ante distribución asimétrica
 
-- **Estado:** Propuesta
+- **Estado:** Aceptada
 - **Fecha:** 2026-10-15
 
-**Contexto (perfilado).** 57.655 clientes. La mediana es 1 operación por cliente y el máximo es 676. El 1% más activo concentra el 12,4% de las operaciones. Los promedios no son representativos.
+**Contexto (perfilado).**
+- 57.655 clientes. La mediana es 1 operación por cliente y el máximo es 676. El 1% más activo concentra el 12,4% de las operaciones.
+- **Los percentiles no discriminan:** el p75 de operaciones por cliente es 1. Cortar por cuartiles pondría al 75% de los clientes en el mismo grupo.
+- El 82,7% de los clientes operó en un solo mes. Marzo está incompleto (el dataset termina el 13/03).
+- **El dataset no trae atributos de cliente**, solo `id_cliente`.
 
-**Decisión propuesta.** Segmentar por percentiles de actividad o volumen (por ejemplo: ocasional, recurrente, heavy y top/institucional) como atributo de `dim_cliente` con SCD Tipo 2, para que un cliente pueda cambiar de segmento a lo largo del tiempo. Este cambio es el caso concreto que pide la consigna para demostrar el SCD.
+**Decisión.**
+- Los atributos de `dim_cliente` se **derivan del comportamiento**: `segmento_actividad` y `canal_principal`. En producción, la dimensión combinaría atributos del maestro de clientes (CRM: perfil de inversor, fecha de alta) con estos atributos derivados; el mecanismo de SCD2 (DT-016) es el mismo.
+- `segmento_actividad` usa **umbrales absolutos sobre operaciones acumuladas**: 1 → `OCASIONAL`, 2-4 → `RECURRENTE`, 5-19 → `FRECUENTE`, 20+ → `INTENSIVO`. El último umbral está cerca del p99.9. Distribución al último corte: 40.841 / 14.387 / 2.257 / 170.
+- `canal_principal`: el canal con más operaciones acumuladas; en caso de empate, el más reciente.
+
+**Alternativas consideradas.**
+- *Inventar un maestro de clientes:* serían datos fabricados, y cualquier análisis sobre ellos carecería de significado.
+- *Percentiles:* no discriminan por la asimetría.
+- *Segmentar por volumen operado:* mezcla ARS y USD y requeriría un tipo de cambio. Se puede sumar cuando estén las cotizaciones (Task 04).
+- *Actividad del mes, en lugar de acumulada:* con el 82,7% de clientes activos un solo mes, el segmento oscilaría entre "activo" e "inactivo" todos los meses y perdería valor descriptivo.
+
+**Consecuencias.** Con actividad acumulada, el segmento solo puede subir. Es razonable para un trimestre; en una historia larga convendría una ventana móvil (por ejemplo, 12 meses) para reflejar clientes que dejan de operar.
 
 ---
 
@@ -297,6 +315,54 @@ Hoy las tres reglas son `WARN`. `ERROR` queda disponible para controles que deba
 - *Framework externo (Great Expectations, DQX):* agrega una dependencia para tres reglas. Delta Live Tables, que tiene *expectations* nativas, está prohibido por la consigna.
 
 **Consecuencias.** Las condiciones son strings SQL, y los tests sin Spark solo validan su estructura (nombres únicos, severidad válida, umbrales reflejados). Su ejecución se testea con PySpark local, en tests que se saltean si PySpark no está instalado.
+
+---
+
+## DT-015: Modelo en estrella con claves subrogadas deterministas
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-15
+
+**Contexto.** Gold tiene que responder consultas analíticas de negocio (Task 06): comportamiento por cliente, instrumento, canal y tiempo.
+
+**Decisión.** Esquema en **estrella**:
+- `fact_operaciones`, con grano de **una transacción**. Contiene las claves de las dimensiones, medidas (`cantidad`, `precio`, `monto`), `id_transaccion` como dimensión degenerada y los flags de calidad de Silver. Conserva todas las filas: el análisis filtra por `dq_status` según lo que necesite.
+- `dim_cliente` (SCD2, DT-016), `dim_instrumento` (un símbolo, con la descripción más frecuente como canónica), `dim_canal` (con tipo APP / WEB / API / OTRO) y `dim_fecha` (días hábiles y feriados; la clave del hecho es la `fecha_operativa`).
+- **Claves subrogadas deterministas:** `xxhash64` de la clave natural, y en `dim_cliente` de `(id_cliente, valid_from)`. Como Gold se reconstruye completo (DT-012), las claves no cambian entre corridas, así que una consulta guardada o un dashboard no se rompen.
+- Controles de integridad en cada corrida: el hecho conserva todas las filas de Silver, no hay claves huérfanas y el SCD2 cumple sus invariantes.
+
+**Alternativas consideradas.**
+- *Copo de nieve* (por ejemplo, separar tipo de instrumento en su propia tabla): normaliza dimensiones chicas a cambio de más joins en cada consulta.
+- *Tabla plana desnormalizada (one big table):* es simple de consultar, pero repite los atributos del cliente en cada operación y complica el SCD2.
+- *Claves autoincrementales (`IDENTITY`):* cambian si la tabla se reconstruye.
+
+**Consecuencias.** La Task 04 agregará `precio_mercado` y el desvío al hecho como columnas nuevas.
+
+---
+
+## DT-016: SCD Tipo 2 en `dim_cliente` con cortes mensuales
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-15
+
+**Contexto.** La consigna pide que la dimensión de clientes soporte cambios de atributos en el tiempo, y demostrarlo con un caso concreto.
+
+**Decisión.**
+- **Atributos versionados:** `segmento_actividad` y `canal_principal` (DT-007). `fecha_primera_operacion` no se versiona porque no cambia.
+- **Cargas:** un corte por mes (31/01, 28/02 y 13/03), aplicados en orden como cargas sucesivas. Cada corte calcula los atributos con la actividad acumulada hasta esa fecha, según la `fecha_operativa`.
+- **Mecanismo:** `MERGE` de Delta con el patrón de *staging*. Un hash de los atributos (`_attr_hash`) detecta cambios. Si cambian, se cierra la versión vigente (`valid_to` = día anterior, `is_current = false`) y se inserta una nueva. Si no cambian, no se toca nada, así que re-aplicar un corte es idempotente.
+- **Vigencia:** una versión rige desde el inicio del mes en que se calculó (`valid_from`). Así, el segmento de un cliente en enero es el que tenía al cierre de enero.
+- **Point-in-time join:** el hecho se une con la versión vigente en la `fecha_operativa` de cada operación.
+- Como Gold se reconstruye completo (DT-012), la dimensión se vacía y se re-aplican todos los cortes. En producción, cada mes se aplicaría solo el corte nuevo con la misma función (`apply_scd2`).
+
+**Resultado.** 65.471 versiones para 57.655 clientes. Cambios: 4.626 en febrero y 3.190 en marzo. 192 clientes tienen 3 versiones. El notebook muestra uno de ellos (enmascarado, DT-013) y sus operaciones asociadas a cada versión.
+
+**Alternativas consideradas.**
+- *SCD Tipo 1 (sobrescribir):* pierde la historia; una operación de enero quedaría con el segmento de marzo.
+- *Calcular la historia completa con funciones de ventana*, sin `MERGE`: es más simple para una reconstrucción completa, pero no muestra el mecanismo incremental que se usaría en producción.
+- *Cortes diarios:* generarían versiones por cambios intradiarios de poco valor analítico y una dimensión mucho más grande.
+
+**Consecuencias.** La vigencia desde el inicio del mes implica que el segmento asignado a una operación usa la actividad del mes completo, incluida la posterior a esa operación. Es una convención de "segmento del período"; si se necesitara el segmento exacto al momento de cada operación, harían falta cortes diarios.
 
 ---
 
