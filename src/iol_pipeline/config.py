@@ -16,6 +16,7 @@ class PipelineConfig:
     landing_volume: str = "raw_files"
     bronze_schema: str = "bronze"
     checkpoints_volume: str = "checkpoints"
+    silver_schema: str = "silver"
 
     # --- Landing -------------------------------------------------------------
     def landing_path(self, source: str) -> str:
@@ -32,3 +33,7 @@ class PipelineConfig:
             f"/Volumes/{self.catalog}/{self.bronze_schema}/{self.checkpoints_volume}"
             f"/{source}/checkpoint"
         )
+
+    # --- Silver --------------------------------------------------------------
+    def silver_table(self, name: str) -> str:
+        return f"{self.catalog}.{self.silver_schema}.{name}"
