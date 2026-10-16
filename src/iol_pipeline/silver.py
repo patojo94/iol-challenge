@@ -23,10 +23,13 @@ MARKET_TZ = "America/Argentina/Buenos_Aires"
 MARKET_OPEN_HOUR = 11
 MARKET_CLOSE_HOUR = 17
 
-# Feriados nacionales con mercado cerrado dentro del período del dataset
-# (ene-mar 2026). Fuente: calendario oficial de feriados de Argentina.
+# Feriados nacionales con mercado cerrado en el período del dataset (ene-mar
+# 2026) y en diciembre 2025, que usa la imputación de precios (DT-020).
+# Fuente: calendario oficial de feriados de Argentina.
 # Para procesar otros períodos hay que extender esta lista (DT-004).
 FERIADOS_AR: dict[date, str] = {
+    date(2025, 12, 8): "Inmaculada Concepción de María",
+    date(2025, 12, 25): "Navidad",
     date(2026, 1, 1): "Año Nuevo",
     date(2026, 2, 16): "Carnaval",
     date(2026, 2, 17): "Carnaval",
