@@ -99,15 +99,26 @@ def evaluate_ingestion(
     )
 
 
-def ingest_csv_to_bronze(
+FORMAT_OPTIONS = {
+    "csv": {"header": "true"},
+    "json": {},  # JSON Lines: un objeto por línea
+}
+
+
+def ingest_csv_to_bronze(spark, source_path, target_table, checkpoint_path, columns, ingested_at) -> None:
+    ingest_files_to_bronze(spark, source_path, target_table, checkpoint_path, columns, ingested_at, "csv")
+
+
+def ingest_files_to_bronze(
     spark,
     source_path: str,
     target_table: str,
     checkpoint_path: str,
     columns: list[tuple[str, str]],
     ingested_at,
+    file_format: str,
 ) -> None:
-    """Ingesta incremental de CSV a una tabla Delta Bronze con Auto Loader.
+    """Ingesta incremental de archivos (CSV o JSON) a una tabla Delta Bronze con Auto Loader.
 
     Idempotencia a nivel archivo: el checkpoint registra los archivos ya
     procesados, así que re-ejecutar no duplica datos. `availableNow` procesa
@@ -118,12 +129,15 @@ def ingest_csv_to_bronze(
     """
     from pyspark.sql import functions as F
 
-    stream = (
+    reader = (
         spark.readStream.format("cloudFiles")
-        .option("cloudFiles.format", "csv")
-        .option("header", "true")
+        .option("cloudFiles.format", file_format)
         .option("rescuedDataColumn", RESCUED_DATA_COLUMN)
-        .schema(to_ddl_schema(columns))
+    )
+    for key, value in FORMAT_OPTIONS[file_format].items():
+        reader = reader.option(key, value)
+    stream = (
+        reader.schema(to_ddl_schema(columns))
         .load(source_path)
         .select(
             "*",
@@ -141,7 +155,7 @@ def ingest_csv_to_bronze(
     query.awaitTermination()
 
 
-def validate_ingestion(spark, target_table: str, ingested_at) -> IngestionResult:
+def validate_ingestion(spark, target_table: str, ingested_at, file_format: str = "csv") -> IngestionResult:
     """Compara lo escrito en Bronze en esta corrida contra los archivos de origen."""
     from pyspark.sql import functions as F
 
@@ -156,7 +170,7 @@ def validate_ingestion(spark, target_table: str, ingested_at) -> IngestionResult
 
     files = list(stats["files"])
     source_rows = (
-        spark.read.option("header", "true").csv(files).count() if files else 0
+        spark.read.format(file_format).options(**FORMAT_OPTIONS[file_format]).load(files).count() if files else 0
     )
 
     return evaluate_ingestion(
