@@ -17,6 +17,7 @@ de columna sin column mapping. Es el único cambio sobre el dato nativo.
 paquete y sus tests no lo requieran.
 """
 
+import logging
 import re
 from datetime import date, timedelta
 
@@ -76,6 +77,9 @@ class YahooClient(FinanceClient):
     def __init__(self, yf_module=None, **retry_kwargs):
         if yf_module is None:
             import yfinance as yf_module  # noqa: PLC0415 - dependencia opcional
+        # yfinance loguea como error cada ticker inexistente; el cliente ya los
+        # captura y devuelve tipificados, así que se silencia ese ruido.
+        logging.getLogger("yfinance").setLevel(logging.CRITICAL)
         self._yf = yf_module
         self._retry_kwargs = retry_kwargs
 
