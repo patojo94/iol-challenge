@@ -61,7 +61,9 @@ def business_calendar(start: date, end: date, holidays: set[date]) -> list[tuple
 # símbolo o sobre la descripción normalizada (trim + mayúsculas).
 # Lo que no matchea ninguna regla se clasifica como ACCION (DT-011).
 INSTRUMENT_RULES: list[tuple[str, str, str]] = [
-    ("OPCION", "simbolo", r"^[A-Z]{3}[CV][0-9]"),  # ej. GFGC79054F: call/put sobre GGAL
+    # Opciones: subyacente + C/V + strike + mes (GFGC79054F, ALUC1000JU, BHIC420.AB).
+    # Exigir el sufijo de mes evita falsos positivos como ABEV3 (CEDEAR) o BPOC7 (BOPREAL).
+    ("OPCION", "simbolo", r"^[A-Z]{3}[CV][0-9]+(\.[0-9]+)?\.?[A-Z]{1,2}$"),
     ("CEDEAR", "descripcion", r"^CEDEAR"),  # incluye el typo "CEDEARV"
     ("BONO", "descripcion", r"^(BONOS?|BONCAP|BOPREAL)\b"),
     ("ON", "descripcion", r"^(ON|O\.N\.)\b"),

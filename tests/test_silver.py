@@ -75,6 +75,11 @@ def test_business_calendar_covers_range():
         ("YMCJO", "YPF S.A. - CLASE XVIII- VTO. 30/9/2033", "ON"),
         ("GFGC79054F", "GFGC79054F", "OPCION"),
         ("GFGV67054F", "GFGV67054F", "OPCION"),
+        ("ALUC1000JU", "ALUC1000JU", "OPCION"),
+        ("BHIC420.AB", "BHIC420.AB", "OPCION"),
+        ("COMC37.0AB", "COMC37.0AB", "OPCION"),
+        ("ABEV3", "Cedear Ambev S.A", "CEDEAR"),       # no es opción aunque empiece con XXXV + dígito
+        ("BPOC7", "BOPREAL Serie 1C Vto 31/10/27", "BONO"),
         ("IRS2W", "Warrant Irsa Vto 13/05/26", "WARRANT"),
         ("YPFD", "YPF", "ACCION"),
         ("GGAL", "Grupo Financiero Galicia S.A", "ACCION"),
