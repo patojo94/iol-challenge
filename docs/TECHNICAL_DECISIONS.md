@@ -25,6 +25,9 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 | [DT-014](#dt-014-registro-declarativo-de-reglas-de-calidad) | Registro declarativo de reglas de calidad | Calidad | Aceptada |
 | [DT-015](#dt-015-modelo-en-estrella-con-claves-subrogadas-deterministas) | Modelo en estrella con claves subrogadas deterministas | Gold | Aceptada |
 | [DT-016](#dt-016-scd-tipo-2-en-dim_cliente-con-cortes-mensuales) | SCD Tipo 2 en `dim_cliente` con cortes mensuales | Gold | Aceptada |
+| [DT-017](#dt-017-fuentes-de-cotizaciones-data912--yahoo-finance) | Fuentes de cotizaciones: data912 + Yahoo Finance | Enriquecimiento | Aceptada |
+| [DT-018](#dt-018-clientes-de-apis-con-una-clase-abstracta-común) | Clientes de APIs con una clase abstracta común | Arquitectura | Aceptada |
+| [DT-019](#dt-019-una-tabla-bronze-por-fuente-y-registro-de-fuentes) | Una tabla Bronze por fuente y registro de fuentes | Arquitectura / Bronze | Aceptada |
 
 ## Pendientes
 
@@ -262,6 +265,8 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - *Tabla de mapeo manual por símbolo:* es más precisa, pero con 1.445 símbolos no es mantenible.
 - *Fuente externa de metadatos:* se evaluará junto con la API de cotizaciones (Task 04).
 
+**Corrección (Task 04).** La regla de opciones (`^[A-Z]{3}[CV][0-9]`) clasificaba como `OPCION` a CEDEARs brasileños (`ABEV3`, `BBDC3`, `HAPV3`) y a un BOPREAL (`BPOC7`). Se ajustó para exigir el sufijo de vencimiento que tienen todas las opciones (`GFGC79054F`, `ALUC1000JU`, `BHIC420.AB`): saca esos 4 falsos positivos sin perder ninguna opción real.
+
 **Consecuencias.** `ACCION` es una categoría por descarte: puede contener instrumentos de deuda con descripciones atípicas. Es el candidato natural para la integración con IA (Task 07).
 
 ---
@@ -363,6 +368,91 @@ Hoy las tres reglas son `WARN`. `ERROR` queda disponible para controles que deba
 - *Cortes diarios:* generarían versiones por cambios intradiarios de poco valor analítico y una dimensión mucho más grande.
 
 **Consecuencias.** La vigencia desde el inicio del mes implica que el segmento asignado a una operación usa la actividad del mes completo, incluida la posterior a esa operación. Es una convención de "segmento del período"; si se necesitara el segmento exacto al momento de cada operación, harían falta cortes diarios.
+
+---
+
+## DT-017: Fuentes de cotizaciones: data912 + Yahoo Finance
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** La Task 04 pide el precio de mercado de cada operación, con la fuente más adecuada por tipo de instrumento. No hay cuenta en IOL, así que su API no está disponible. Se relevaron dos fuentes gratuitas sobre los 1.445 símbolos del dataset, y se verificó que Databricks Free Edition puede llamarlas.
+
+**Relevamiento (cobertura ponderada por operaciones).**
+
+| Tipo | Ops | Yahoo | data912 | Combinado |
+|---|---|---|---|---|
+| CEDEAR ARS | 47.520 | 87,0% | + 6,5% | ~93% |
+| ACCION ARS | 17.099 | 99,9% | — | 99,9% |
+| BONO ARS / MEP / Cable | 18.974 | 0% | 83-96% | ~87% |
+| CEDEAR y ACCION MEP | 7.483 | 94-97% | 0% | ~95% |
+| LETRA, ON, OPCION, WARRANT | ~8.900 | ~1% | ~1% | ~2% |
+| **Total** | 100.000 | 65,6% | + 19,7% | **~85%** |
+
+**Hallazgos.**
+- **Yahoo ajusta retroactivamente por splits**, incluso con `auto_adjust=False`: SPY 3:1 (29/05/2026) e YPFD 10:1 (03/08/2026). Sin revertirlo, las operaciones de enero en SPY parecerían pagadas un 200% sobre el mercado. Yahoo publica el historial de splits, así que el ajuste es reversible.
+- **data912 publica precios sin ajustar** (SPY: ratio 1,008 contra lo operado) y la renta fija **cada 100 VN** (ratio exacto de 0,01).
+- Yahoo responde **429** a pedidos sin User-Agent de navegador y bajo carga. Con `yfinance` funciona desde Databricks.
+
+**Decisión.**
+| Instrumentos | Fuente primaria | Respaldo |
+|---|---|---|
+| Acciones y CEDEARs ARS | data912 (sin ajustar) | Yahoo, revirtiendo splits |
+| Acciones y CEDEARs MEP (`D`) | Yahoo, revirtiendo splits | — |
+| Bonos ARS, MEP y Cable | data912, ÷ 100 | — |
+| Letras, ONs, opciones, warrants | Sin fuente gratuita: `SIN_COTIZACION` | — |
+
+**Alternativas consideradas.**
+- *Solo Yahoo:* 65,6% de cobertura y ningún instrumento de renta fija.
+- *Solo data912:* no tiene variantes MEP de acciones ni CEDEARs; es un servicio comunitario sin SLA.
+- *API de IOL:* probablemente cubriría todo, pero requiere una cuenta.
+
+**Consecuencias.** ~15% de las operaciones queda sin precio de mercado, y se documenta en la tabla de cobertura. data912 no tiene SLA: si deja de responder, los instrumentos de los que es fuente única quedan sin precio, pero el pipeline sigue (DT-018).
+
+---
+
+## DT-018: Clientes de APIs con una clase abstracta común
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** Cada fuente tiene su propio formato, sus endpoints y su comportamiento ante errores. La consigna pide que el pipeline no falle ante la ausencia de datos para un ticker y que se documente el manejo de errores de la API.
+
+**Decisión.** Paquete `src/integrations/finance/`, **separado de `iol_pipeline`**: los clientes son genéricos y no conocen el pipeline (`iol_pipeline` usa `integrations`, nunca al revés; un test lo verifica). Podrían reutilizarse o extraerse a una librería sin arrastrar el pipeline. La configuración de cómo el pipeline usa cada fuente (tablas, prioridades) vive en `src/iol_pipeline/sources.py` (DT-019).
+- `base.py`: clase abstracta `FinanceClient` con el patrón *template method*. `fetch()` es común: recorre los pedidos, saltea los tipos de instrumento que la fuente no soporta y **convierte cualquier excepción de un símbolo en un error registrado** (`NOT_FOUND`, `EMPTY`, `HTTP`, `TIMEOUT`, `PARSE`, `UNEXPECTED`). Ningún símbolo puede cortar la corrida. Cada subclase implementa `supports`, `ticker_for` y `fetch_symbol`.
+- `http.py`: reintentos con **backoff exponencial** (1 s, 2 s, 4 s...) ante 429, 5xx y timeouts, respetando `Retry-After`. Los errores definitivos (404, otros 4xx) no se reintentan.
+- `data912.py` y `yahoo.py`: un cliente por fuente. **Devuelven las filas en el formato nativo de cada API** (DT-019): en Yahoo, precios ajustados con la columna de splits; en data912, precio por 100 VN y todos sus campos.
+- `fetch()` acepta `max_workers` para hacer pedidos concurrentes, conservando el orden de los resultados. La normalización se hace en Silver, con el mismo criterio de DT-003: si cambia una regla, se reprocesa sin volver a llamar a las APIs.
+- Las dependencias externas se inyectan (`http_get`, `yf_module`, `sleep`), así que los tests simulan las APIs sin red. `yfinance` es una dependencia opcional y se importa solo al crear el cliente de Yahoo.
+
+**Alternativas consideradas.**
+- *Funciones sueltas por fuente:* cada una tendría que repetir el aislamiento de errores y los reintentos.
+- *Normalizar dentro de cada cliente:* mezcla la obtención con reglas de negocio y obliga a volver a llamar a la API para reprocesar.
+
+**Consecuencias.** Sumar una fuente (por ejemplo, la API de IOL) es agregar una subclase de `FinanceClient`.
+
+---
+
+## DT-019: Una tabla Bronze por fuente y registro de fuentes
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** Las cotizaciones llegan de varias APIs con formatos distintos (data912: `o, h, l, c, v, dr, sa`; Yahoo: `Open, ..., Adj Close, Dividends, Stock Splits`), y se espera sumar fuentes en el futuro.
+
+**Decisión.**
+- **Bronze alineado a la fuente:** una tabla por fuente con sus **campos nativos** (`bronze.data912_cotizaciones`, `bronze.yahoo_cotizaciones`). La unificación en un modelo común se hace en Silver. El único cambio sobre el dato nativo es pasar los nombres de Yahoo a snake_case, porque Delta no admite espacios sin column mapping. Si una API agrega campos, Auto Loader los guarda en `_rescued_data`.
+- **Flujo igual al de transacciones:** las respuestas crudas aterrizan como JSON Lines en `landing/raw_files/cotizaciones/{fuente}/extraccion_{ts}.jsonl` y entran con Auto Loader (idempotente por archivo, DT-003). La función de ingesta de Bronze se generalizó para CSV y JSON.
+- **Historia de extracciones:** cada extracción es un archivo nuevo, así que Bronze guarda qué respondió cada API y cuándo (`_extracted_at`). Silver se queda con la última.
+- **Sin llamadas repetidas:** si una fuente ya se extrajo ese día, no se vuelve a llamar a su API, salvo `force_extract`. Re-ejecutar el pipeline no castiga a las fuentes.
+- **`bronze.errores_api` compartida:** no son datos de una fuente sino un registro operativo del pipeline, con el mismo formato para todas. Es la base del monitoreo de la Task 05.
+- **Registro `QUOTE_SOURCES`** (`src/iol_pipeline/sources.py`): cada `QuoteSource` declara su cliente (como *factory*, para no importar `yfinance` hasta usarlo), su tabla Bronze y su schema, sus prioridades por tipo de instrumento y su concurrencia. El notebook recorre el registro.
+
+**Para sumar una fuente:** un cliente (subclase de `FinanceClient`), su tabla en `setup/06_cotizaciones.sql` y su `QuoteSource`. Un test verifica que el schema declarado coincida con el DDL.
+
+**Alternativas consideradas.**
+- *Una tabla Bronze común con columna `fuente`:* no requiere DDL por fuente, pero obliga a convertir al modelo común antes de Bronze, pierde los campos propios de cada API y acopla las fuentes (un cambio de formato en una afecta la tabla de todas).
+- *Escribir directo a Bronze, sin pasar por landing:* es más simple, pero pierde la respuesta cruda como archivo y el mismo mecanismo de idempotencia que el resto del pipeline.
 
 ---
 
