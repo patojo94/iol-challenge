@@ -124,3 +124,30 @@ def test_extract_source_skips_if_already_extracted_today(tmp_path):
     forced, _ = extract_source(STUB_SOURCE, REQUESTS, date(2026, 1, 1), date(2026, 3, 31), str(landing), later,
                                force=True)
     assert not forced.omitida and len(list(landing.iterdir())) == 2
+
+
+def test_summary_schema_matches_dataclass_fields():
+    from dataclasses import fields
+
+    from iol_pipeline.cotizaciones import EXTRACTION_SUMMARY_SCHEMA, ExtractionSummary
+
+    schema_names = [part.strip().split()[0] for part in EXTRACTION_SUMMARY_SCHEMA.split(",")]
+    assert schema_names == [f.name for f in fields(ExtractionSummary)]
+
+
+def test_summary_rows_with_all_sources_skipped_can_be_displayed(spark, tmp_path):
+    """Regresión: si todas las fuentes se omiten, `archivo` es NULL en todas las
+    filas y sin schema explícito Spark falla con CANNOT_DETERMINE_TYPE."""
+    from iol_pipeline.cotizaciones import EXTRACTION_SUMMARY_SCHEMA
+
+    landing = tmp_path / "stub"
+    extract_source(STUB_SOURCE, REQUESTS, date(2026, 1, 1), date(2026, 3, 31), str(landing), EXTRACTION_AT_SKIP)
+    skipped, _ = extract_source(STUB_SOURCE, REQUESTS, date(2026, 1, 1), date(2026, 3, 31), str(landing),
+                                EXTRACTION_AT_SKIP)
+    assert skipped.omitida and skipped.archivo is None
+
+    df = spark.createDataFrame([skipped.to_row(), skipped.to_row()], EXTRACTION_SUMMARY_SCHEMA)
+    assert df.where("archivo IS NULL").count() == 2
+
+
+EXTRACTION_AT_SKIP = datetime(2026, 10, 17, 9, 0, 0)

@@ -13,7 +13,7 @@ respondió cada API y cuándo. Silver se queda con la última extracción.
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, astuple, dataclass
 from datetime import date, datetime, timedelta
 
 from integrations.finance.base import QuoteRequest
@@ -51,6 +51,14 @@ def write_jsonl(path: str, records: list[dict], extracted_at: datetime) -> int:
     return len(records)
 
 
+# Schema explícito para mostrar los resúmenes: si todas las fuentes se omiten,
+# `archivo` es NULL en todas las filas y Spark no puede inferir su tipo.
+EXTRACTION_SUMMARY_SCHEMA = (
+    "fuente STRING, pedidos INT, simbolos_con_datos INT, registros INT, errores INT, "
+    "archivo STRING, omitida BOOLEAN, motivo STRING"
+)
+
+
 @dataclass
 class ExtractionSummary:
     fuente: str
@@ -64,6 +72,10 @@ class ExtractionSummary:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def to_row(self) -> tuple:
+        """Valores en el orden de EXTRACTION_SUMMARY_SCHEMA."""
+        return astuple(self)
 
 
 def extract_source(
