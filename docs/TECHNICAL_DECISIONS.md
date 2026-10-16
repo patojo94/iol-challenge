@@ -28,6 +28,8 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 | [DT-017](#dt-017-fuentes-de-cotizaciones-data912--yahoo-finance) | Fuentes de cotizaciones: data912 + Yahoo Finance | Enriquecimiento | Aceptada |
 | [DT-018](#dt-018-clientes-de-apis-con-una-clase-abstracta-común) | Clientes de APIs con una clase abstracta común | Arquitectura | Aceptada |
 | [DT-019](#dt-019-una-tabla-bronze-por-fuente-y-registro-de-fuentes) | Una tabla Bronze por fuente y registro de fuentes | Arquitectura / Bronze | Aceptada |
+| [DT-020](#dt-020-imputación-del-precio-de-mercado) | Imputación del precio de mercado | Enriquecimiento | Aceptada |
+| [DT-021](#dt-021-silvercotizaciones-normalización-y-fuente-preferida) | `silver.cotizaciones`: normalización y fuente preferida | Silver / Enriquecimiento | Aceptada |
 
 ## Pendientes
 
@@ -43,6 +45,7 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - [ ] Confirmar el horario de mercado de BYMA contra la fuente oficial (hoy 11:00 a 17:00 ART en `MARKET_OPEN_HOUR` / `MARKET_CLOSE_HOUR`), incluyendo preapertura y diferencias por segmento (DT-004).
 - [ ] Extender `FERIADOS_AR` si se procesan períodos fuera de ene-mar 2026 (DT-004).
 - [ ] Preguntar a IOL si puede compartir un maestro de clientes (perfil de inversor, fecha de alta) para sumar atributos a `dim_cliente` (DT-007).
+- [ ] Exportar a README la tabla de cobertura de cotizaciones por símbolo (`gold.cobertura_cotizaciones`).
 - [ ] Clasificar con IA los instrumentos que caen en `ACCION` por descarte (DT-011, Task 07).
 
 ---
@@ -453,6 +456,62 @@ Hoy las tres reglas son `WARN`. `ERROR` queda disponible para controles que deba
 **Alternativas consideradas.**
 - *Una tabla Bronze común con columna `fuente`:* no requiere DDL por fuente, pero obliga a convertir al modelo común antes de Bronze, pierde los campos propios de cada API y acopla las fuentes (un cambio de formato en una afecta la tabla de todas).
 - *Escribir directo a Bronze, sin pasar por landing:* es más simple, pero pierde la respuesta cruda como archivo y el mismo mecanismo de idempotencia que el resto del pipeline.
+
+---
+
+## DT-020: Imputación del precio de mercado
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** La consigna pide documentar la estrategia de imputación para operaciones en días sin cotización oficial. Hay dos situaciones distintas:
+1. **La operación cae en un día sin rueda** (sábado o feriado): 10.255 operaciones.
+2. **La operación cae en día hábil, pero el símbolo no cotizó ese día** (instrumentos poco líquidos) o la fuente no tiene ese día.
+
+Las fuentes gratuitas publican precios **diarios** (cierre), no intradiarios.
+
+**Decisión.**
+- **Precio de mercado = cierre de la `fecha_operativa`.** Para el caso 1 ya está resuelto en Silver: `fecha_operativa` es el siguiente día hábil (DT-004), porque una orden cargada un sábado se ejecuta en la rueda del lunes. Se valoriza con el cierre del lunes y queda como `EXACTO`.
+- **Caso 2: último cierre disponible de hasta 5 días hábiles antes** (`IMPUTATION_MAX_BUSINESS_DAYS`), con `tipo_precio = IMPUTADO` y `dias_habiles_desfase` para saber cuán viejo es el precio. La distancia se mide en **días hábiles** con el calendario de feriados, no en días corridos: un fin de semana largo de carnaval no consume la ventana.
+- **Más allá de 5 días hábiles, o sin fuente para el instrumento:** `tipo_precio = SIN_COTIZACION` y precio nulo. La operación se conserva en el hecho, y el análisis la excluye de las métricas de desvío.
+- **Solo hacia atrás:** el cierre posterior a la operación no se usa, porque no estaba disponible al operar.
+- El hecho guarda `precio_mercado`, `fecha_precio_mercado`, `fuente_precio`, `dias_habiles_desfase`, `tipo_precio` y `desvio_vs_mercado_pct`.
+
+**Por qué 5 días hábiles.** Es una semana de rueda: cubre feriados largos y huecos de liquidez puntuales. Con más días, el precio deja de representar al mercado del momento, y en instrumentos volátiles (por ejemplo, con alta inflación en ARS) el desvío medido sería un artefacto de la antigüedad del precio. Queda parametrizado para ajustarlo.
+
+**Alternativas consideradas.**
+- *Interpolar entre el cierre anterior y el posterior:* usa información futura y supone una trayectoria lineal que no existe.
+- *Promedio de la semana:* suaviza, pero mezcla precios posteriores a la operación.
+- *Sin límite de antigüedad:* daría precio a casi todo, pero precios de semanas atrás no sirven para medir si un cliente operó por encima del mercado.
+- *Precio de referencia interno* (mediana de lo operado en el dataset): no es un precio de mercado externo, y mediría a los clientes contra sí mismos.
+
+**Consecuencias.** El cierre diario es una aproximación del precio "al momento de la operación": el desvío medido incluye la variación intradiaria. Por eso las métricas de la Task 06 deben mirar desvíos **sistemáticos** (por cliente o instrumento), no operaciones individuales.
+
+---
+
+## DT-021: `silver.cotizaciones`: normalización y fuente preferida
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** Cada fuente publica precios en su propia escala: data912 cotiza la renta fija cada 100 VN, y Yahoo ajusta retroactivamente por splits (DT-017). Además, un mismo símbolo y día puede venir de varias fuentes.
+
+**Decisión.** Una función de conformado por fuente (`CONFORMERS` en `silver_cotizaciones.py`) lleva las filas nativas de Bronze a un modelo común (`simbolo, fecha, fuente, apertura, maximo, minimo, cierre, volumen`):
+- **data912:** `cierre = c × 0,01` en bonos, letras y ONs.
+- **Yahoo:** `cierre = close × producto de los splits posteriores a la fecha`. La fila del día del split ya está en la escala nueva, por eso solo cuentan los estrictamente posteriores.
+- Se guardan `cierre_fuente` y `factor_ajuste`, así cualquier precio se puede rastrear al dato publicado.
+- **Última extracción:** por (símbolo, fecha), la más reciente. Si un símbolo falló en la última extracción, se conserva el dato anterior: una falla puntual de la API no borra precios.
+- **Fuente preferida:** se conservan **todas las fuentes**, y `es_preferida` marca, por (símbolo, fecha), la de menor prioridad del registro para el tipo de instrumento (DT-019). Si la primaria no tiene ese día, la preferida pasa a ser el respaldo.
+
+**Validaciones** (en el notebook `04_silver_cotizaciones`):
+- **Consistencia entre fuentes:** donde data912 y Yahoo cotizan el mismo símbolo y día, sus cierres normalizados deben coincidir. Ej. YPFD: Yahoo 5.527,5 × 10 (split) = 55.275 frente a 55.300 de data912.
+- **Escala contra lo operado:** la mediana de `precio operado / cierre` por fuente y tipo de instrumento debe dar cerca de 1.
+
+**Resultado en la prueba de punta a punta** (muestra de símbolos): desvío mediano contra el mercado de AL30 0,00%, AL30D −0,07%, SPYD −0,08% (con split revertido), YPFD 0,20% y GGAL 0,56%.
+
+**Alternativas consideradas.**
+- *Guardar solo la fuente preferida:* es más simple, pero pierde la validación cruzada y la capacidad de cambiar prioridades sin reprocesar.
+- *Usar `adj_close` de Yahoo:* también ajusta por dividendos, así que no es el precio negociado ese día.
 
 ---
 
