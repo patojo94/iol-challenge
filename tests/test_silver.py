@@ -162,20 +162,7 @@ def test_rule_parameters_are_reflected_in_condition():
 
 
 # --- Ejecución de las reglas con Spark local (opcional) -------------------------------
-# Se saltea si PySpark no está instalado; requiere Java.
-
-@pytest.fixture(scope="module")
-def spark():
-    pyspark = pytest.importorskip("pyspark")
-    session = (
-        pyspark.sql.SparkSession.builder.master("local[1]")
-        .config("spark.sql.ansi.enabled", "true")
-        .config("spark.ui.enabled", "false")
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
-
+# El fixture `spark` está en conftest.py; se saltea si PySpark no está instalado.
 
 def test_apply_dq_rules_flags_and_status(spark):
     from iol_pipeline.silver import apply_dq_rules
