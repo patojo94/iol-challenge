@@ -6,6 +6,8 @@ requires-python = ">=3.10"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Cliente de Yahoo Finance (Task 04). En Databricks: %pip install yfinance
+integrations = ["yfinance>=0.2"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
