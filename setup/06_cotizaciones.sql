@@ -72,3 +72,24 @@ CREATE TABLE IF NOT EXISTS workspace.bronze.errores_api (
 USING DELTA
 COMMENT 'Registro operativo de errores de las APIs de cotizaciones (todas las fuentes)'
 TBLPROPERTIES ('quality' = 'bronze');
+
+CREATE TABLE IF NOT EXISTS workspace.silver.cotizaciones (
+    simbolo             STRING          COMMENT 'Símbolo del dataset',
+    fecha               DATE            COMMENT 'Fecha de la rueda',
+    fuente              STRING          COMMENT 'Fuente de la cotización (data912, yahoo)',
+    prioridad           INT             COMMENT 'Prioridad de la fuente para el tipo de instrumento (1 = primaria)',
+    es_preferida        BOOLEAN         COMMENT 'Cotización elegida para (simbolo, fecha): la de menor prioridad disponible',
+    apertura            DOUBLE          COMMENT 'Apertura normalizada',
+    maximo              DOUBLE          COMMENT 'Máximo normalizado',
+    minimo              DOUBLE          COMMENT 'Mínimo normalizado',
+    cierre              DOUBLE          COMMENT 'Cierre normalizado: precio por 1 VN, sin ajuste por splits posteriores',
+    volumen             DOUBLE          COMMENT 'Volumen informado por la fuente',
+    cierre_fuente       DOUBLE          COMMENT 'Cierre tal como lo publica la fuente',
+    factor_ajuste       DOUBLE          COMMENT 'cierre = cierre_fuente x factor_ajuste (÷100 en renta fija de data912, splits revertidos en Yahoo)',
+    _extracted_at       TIMESTAMP       COMMENT 'Extracción de la que proviene el dato',
+    _processed_at       TIMESTAMP       COMMENT 'Momento en que se generó la fila en silver'
+)
+USING DELTA
+CLUSTER BY (simbolo, fecha)
+COMMENT 'Cotizaciones diarias de todas las fuentes, normalizadas a un modelo común (DT-021)'
+TBLPROPERTIES ('quality' = 'silver');

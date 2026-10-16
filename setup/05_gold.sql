@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS workspace.gold.fact_operaciones (
     cantidad            DECIMAL(20, 6)  COMMENT 'Cantidad de títulos',
     precio              DECIMAL(20, 6)  COMMENT 'Precio operado',
     monto               DECIMAL(24, 6)  COMMENT 'cantidad x precio',
+    precio_mercado      DECIMAL(20, 6)  COMMENT 'Cierre de mercado asignado (Task 04), NULL si SIN_COTIZACION',
+    fecha_precio_mercado DATE           COMMENT 'Fecha del cierre usado',
+    fuente_precio       STRING          COMMENT 'Fuente del cierre (data912, yahoo)',
+    dias_habiles_desfase INT            COMMENT 'Días hábiles entre fecha_operativa y fecha_precio_mercado',
+    tipo_precio         STRING          COMMENT 'EXACTO, IMPUTADO (hasta 5 días hábiles antes) o SIN_COTIZACION (DT-020)',
+    desvio_vs_mercado_pct DOUBLE        COMMENT '(precio - precio_mercado) / precio_mercado x 100',
     en_horario_mercado  BOOLEAN         COMMENT 'Operación en día hábil y horario de BYMA',
     dq_status           STRING          COMMENT 'OK, WARN o ERROR (desde silver)',
     dq_flags            ARRAY<STRING>   COMMENT 'Flags de calidad (desde silver)',
@@ -88,3 +94,19 @@ CREATE TABLE IF NOT EXISTS workspace.gold.fact_operaciones (
 USING DELTA
 CLUSTER BY (fecha_key)
 COMMENT 'Hechos de operaciones bursátiles (grano: una transacción)';
+
+CREATE TABLE IF NOT EXISTS workspace.gold.cobertura_cotizaciones (
+    simbolo                 STRING      COMMENT 'Símbolo',
+    tipo_instrumento        STRING      COMMENT 'Tipo de instrumento',
+    tipo_liquidacion        STRING      COMMENT 'ARS, MEP o CABLE',
+    operaciones             BIGINT      COMMENT 'Operaciones del símbolo',
+    ops_precio_exacto       BIGINT      COMMENT 'Operaciones con cierre del mismo día',
+    ops_precio_imputado     BIGINT      COMMENT 'Operaciones con cierre de hasta 5 días hábiles antes',
+    ops_sin_cotizacion      BIGINT      COMMENT 'Operaciones sin precio de mercado',
+    pct_con_precio          DOUBLE      COMMENT '% de operaciones con precio (exacto o imputado)',
+    fuente_principal        STRING      COMMENT 'Fuente más usada para el símbolo',
+    motivo_sin_cotizacion   STRING      COMMENT 'Por qué faltan precios (errores de API, sin fuente, fuera de ventana)',
+    _processed_at           TIMESTAMP   COMMENT 'Momento en que se generó la fila'
+)
+USING DELTA
+COMMENT 'Cobertura de cotizaciones de mercado por símbolo (Task 04)';

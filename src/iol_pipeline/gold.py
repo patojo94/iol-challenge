@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 
 from iol_pipeline.silver import FERIADOS_AR, is_business_day
+from iol_pipeline.silver_cotizaciones import MARKET_PRICE_COLUMNS, MARKET_PRICE_TYPES
 
 # --- Segmentación de clientes (DT-007) ---------------------------------------------
 
@@ -116,6 +117,7 @@ DIM_CLIENTE_COLUMNS = [
 FACT_COLUMNS = [
     "id_transaccion", "fecha_key", "cliente_sk", "instrumento_key", "canal_key",
     "fecha_hora_local", "tipo_operacion", "moneda", "cantidad", "precio", "monto",
+    *MARKET_PRICE_COLUMNS,
     "en_horario_mercado", "dq_status", "dq_flags", "_processed_at",
 ]
 
@@ -315,9 +317,10 @@ def build_dim_cliente(spark, silver_df, dim_table: str, cutoffs: list[tuple[date
     return loads
 
 
-def build_fact(silver_df, dim_cliente_df, processed_at):
+def build_fact(silver_df, dim_cliente_df, processed_at, market_prices_df=None):
     """Hecho con grano transacción. El cliente se une con la versión vigente
-    en la fecha operativa (point-in-time join)."""
+    en la fecha operativa (point-in-time join), y cada operación con su precio
+    de mercado (`silver_cotizaciones.match_market_prices`, Task 04)."""
     from pyspark.sql import functions as F
 
     clientes = dim_cliente_df.select("cliente_sk", "id_cliente", "valid_from", "valid_to")
@@ -329,6 +332,11 @@ def build_fact(silver_df, dim_cliente_df, processed_at):
         & F.col("s.fecha_operativa").between(F.col("c.valid_from"), F.col("c.valid_to")),
         "left",
     )
+    if market_prices_df is None:
+        market = [F.lit(None).cast(t).alias(c) for c, t in MARKET_PRICE_TYPES.items()]
+    else:
+        joined = joined.join(market_prices_df.alias("m"), F.col("s.id_transaccion") == F.col("m.id_transaccion"), "left")
+        market = [F.col(f"m.{c}").alias(c) for c in MARKET_PRICE_COLUMNS]
     return joined.select(
         F.col("s.id_transaccion").alias("id_transaccion"),
         F.date_format("s.fecha_operativa", "yyyyMMdd").cast("int").alias("fecha_key"),
@@ -341,6 +349,7 @@ def build_fact(silver_df, dim_cliente_df, processed_at):
         F.col("s.cantidad").alias("cantidad"),
         F.col("s.precio").alias("precio"),
         F.col("s.monto").alias("monto"),
+        *market,
         F.col("s.en_horario_mercado").alias("en_horario_mercado"),
         F.col("s.dq_status").alias("dq_status"),
         F.col("s.dq_flags").alias("dq_flags"),
