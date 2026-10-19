@@ -46,6 +46,7 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - [ ] Extender `FERIADOS_AR` si se procesan períodos fuera de ene-mar 2026 (DT-004).
 - [ ] Preguntar a IOL si puede compartir un maestro de clientes (perfil de inversor, fecha de alta) para sumar atributos a `dim_cliente` (DT-007).
 - [ ] Exportar a README la tabla de cobertura de cotizaciones por símbolo (`gold.cobertura_cotizaciones`).
+- [ ] Task 05: control de frescura de cotizaciones antes de habilitar Gold (última `_extracted_at` de cada fuente). Hoy las precondiciones solo verifican que Bronze no esté vacío, así que correr el 04 sin el 03 procesa una extracción vieja sin avisar.
 - [ ] Clasificar con IA los instrumentos que caen en `ACCION` por descarte (DT-011, Task 07).
 
 ---
@@ -499,6 +500,7 @@ Las fuentes gratuitas publican precios **diarios** (cierre), no intradiarios.
 **Decisión.** Una función de conformado por fuente (`CONFORMERS` en `silver_cotizaciones.py`) lleva las filas nativas de Bronze a un modelo común (`simbolo, fecha, fuente, apertura, maximo, minimo, cierre, volumen`):
 - **data912:** `cierre = c × 0,01` en bonos, letras y ONs.
 - **Yahoo:** `cierre = close × producto de los splits posteriores a la fecha`. La fila del día del split ya está en la escala nueva, por eso solo cuentan los estrictamente posteriores.
+- **Yahoo no siempre ajusta la historia.** Informa el split, pero en algunos símbolos no ajusta los precios previos: MIRG informa un 10:1 y sus cierres de enero ya están en la escala original. Revertirlo multiplicaría por 10 un precio correcto. Por eso **se detecta con los datos** (`yahoo_split_events`): si la serie es continua en la fecha del split (salto entre el cierre previo y el del día ≈ 1), Yahoo ajustó la historia y el split se revierte; si el precio salta en el tamaño del factor, no se revierte. La decisión es por cercanía en escala logarítmica. Si falta el cierre de ese día (ETHAD), o el factor es menor a 1,5× (dividendos en acciones de 1-3%, como ITUB o SCCO, cuyo salto se confunde con la variación diaria), se asume ajustado.
 - Se guardan `cierre_fuente` y `factor_ajuste`, así cualquier precio se puede rastrear al dato publicado.
 - **Última extracción:** por (símbolo, fecha), la más reciente. Si un símbolo falló en la última extracción, se conserva el dato anterior: una falla puntual de la API no borra precios.
 - **Fuente preferida:** se conservan **todas las fuentes**, y `es_preferida` marca, por (símbolo, fecha), la de menor prioridad del registro para el tipo de instrumento (DT-019). Si la primaria no tiene ese día, la preferida pasa a ser el respaldo.
@@ -506,6 +508,7 @@ Las fuentes gratuitas publican precios **diarios** (cierre), no intradiarios.
 **Validaciones** (en el notebook `04_silver_cotizaciones`):
 - **Consistencia entre fuentes:** donde data912 y Yahoo cotizan el mismo símbolo y día, sus cierres normalizados deben coincidir. Ej. YPFD: Yahoo 5.527,5 × 10 (split) = 55.275 frente a 55.300 de data912.
 - **Escala contra lo operado:** la mediana de `precio operado / cierre` por fuente y tipo de instrumento debe dar cerca de 1.
+- **Splits reales:** en los 13 símbolos con splits informados por Yahoo, el cierre corregido queda entre 0,94 y 1,05 del precio operado. Sin la detección, MIRG daba 0,10 y ETHAD 0,32.
 
 **Resultado en la prueba de punta a punta** (muestra de símbolos): desvío mediano contra el mercado de AL30 0,00%, AL30D −0,07%, SPYD −0,08% (con split revertido), YPFD 0,20% y GGAL 0,56%.
 
