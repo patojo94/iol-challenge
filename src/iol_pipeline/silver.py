@@ -23,10 +23,13 @@ MARKET_TZ = "America/Argentina/Buenos_Aires"
 MARKET_OPEN_HOUR = 11
 MARKET_CLOSE_HOUR = 17
 
-# Feriados nacionales con mercado cerrado dentro del período del dataset
-# (ene-mar 2026). Fuente: calendario oficial de feriados de Argentina.
+# Feriados nacionales con mercado cerrado en el período del dataset (ene-mar
+# 2026) y en diciembre 2025, que usa la imputación de precios (DT-020).
+# Fuente: calendario oficial de feriados de Argentina.
 # Para procesar otros períodos hay que extender esta lista (DT-004).
 FERIADOS_AR: dict[date, str] = {
+    date(2025, 12, 8): "Inmaculada Concepción de María",
+    date(2025, 12, 25): "Navidad",
     date(2026, 1, 1): "Año Nuevo",
     date(2026, 2, 16): "Carnaval",
     date(2026, 2, 17): "Carnaval",
@@ -61,7 +64,9 @@ def business_calendar(start: date, end: date, holidays: set[date]) -> list[tuple
 # símbolo o sobre la descripción normalizada (trim + mayúsculas).
 # Lo que no matchea ninguna regla se clasifica como ACCION (DT-011).
 INSTRUMENT_RULES: list[tuple[str, str, str]] = [
-    ("OPCION", "simbolo", r"^[A-Z]{3}[CV][0-9]"),  # ej. GFGC79054F: call/put sobre GGAL
+    # Opciones: subyacente + C/V + strike + mes (GFGC79054F, ALUC1000JU, BHIC420.AB).
+    # Exigir el sufijo de mes evita falsos positivos como ABEV3 (CEDEAR) o BPOC7 (BOPREAL).
+    ("OPCION", "simbolo", r"^[A-Z]{3}[CV][0-9]+(\.[0-9]+)?\.?[A-Z]{1,2}$"),
     ("CEDEAR", "descripcion", r"^CEDEAR"),  # incluye el typo "CEDEARV"
     ("BONO", "descripcion", r"^(BONOS?|BONCAP|BOPREAL)\b"),
     ("ON", "descripcion", r"^(ON|O\.N\.)\b"),

@@ -25,6 +25,11 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 | [DT-014](#dt-014-registro-declarativo-de-reglas-de-calidad) | Registro declarativo de reglas de calidad | Calidad | Aceptada |
 | [DT-015](#dt-015-modelo-en-estrella-con-claves-subrogadas-deterministas) | Modelo en estrella con claves subrogadas deterministas | Gold | Aceptada |
 | [DT-016](#dt-016-scd-tipo-2-en-dim_cliente-con-cortes-mensuales) | SCD Tipo 2 en `dim_cliente` con cortes mensuales | Gold | Aceptada |
+| [DT-017](#dt-017-fuentes-de-cotizaciones-data912--yahoo-finance) | Fuentes de cotizaciones: data912 + Yahoo Finance | Enriquecimiento | Aceptada |
+| [DT-018](#dt-018-clientes-de-apis-con-una-clase-abstracta-común) | Clientes de APIs con una clase abstracta común | Arquitectura | Aceptada |
+| [DT-019](#dt-019-una-tabla-bronze-por-fuente-y-registro-de-fuentes) | Una tabla Bronze por fuente y registro de fuentes | Arquitectura / Bronze | Aceptada |
+| [DT-020](#dt-020-imputación-del-precio-de-mercado) | Imputación del precio de mercado | Enriquecimiento | Aceptada |
+| [DT-021](#dt-021-silvercotizaciones-normalización-y-fuente-preferida) | `silver.cotizaciones`: normalización y fuente preferida | Silver / Enriquecimiento | Aceptada |
 
 ## Pendientes
 
@@ -40,6 +45,8 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - [ ] Confirmar el horario de mercado de BYMA contra la fuente oficial (hoy 11:00 a 17:00 ART en `MARKET_OPEN_HOUR` / `MARKET_CLOSE_HOUR`), incluyendo preapertura y diferencias por segmento (DT-004).
 - [ ] Extender `FERIADOS_AR` si se procesan períodos fuera de ene-mar 2026 (DT-004).
 - [ ] Preguntar a IOL si puede compartir un maestro de clientes (perfil de inversor, fecha de alta) para sumar atributos a `dim_cliente` (DT-007).
+- [ ] Exportar a README la tabla de cobertura de cotizaciones por símbolo (`gold.cobertura_cotizaciones`).
+- [ ] Task 05: control de frescura de cotizaciones antes de habilitar Gold (última `_extracted_at` de cada fuente). Hoy las precondiciones solo verifican que Bronze no esté vacío, así que correr el 04 sin el 03 procesa una extracción vieja sin avisar.
 - [ ] Clasificar con IA los instrumentos que caen en `ACCION` por descarte (DT-011, Task 07).
 
 ---
@@ -262,6 +269,8 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - *Tabla de mapeo manual por símbolo:* es más precisa, pero con 1.445 símbolos no es mantenible.
 - *Fuente externa de metadatos:* se evaluará junto con la API de cotizaciones (Task 04).
 
+**Corrección (Task 04).** La regla de opciones (`^[A-Z]{3}[CV][0-9]`) clasificaba como `OPCION` a CEDEARs brasileños (`ABEV3`, `BBDC3`, `HAPV3`) y a un BOPREAL (`BPOC7`). Se ajustó para exigir el sufijo de vencimiento que tienen todas las opciones (`GFGC79054F`, `ALUC1000JU`, `BHIC420.AB`): saca esos 4 falsos positivos sin perder ninguna opción real.
+
 **Consecuencias.** `ACCION` es una categoría por descarte: puede contener instrumentos de deuda con descripciones atípicas. Es el candidato natural para la integración con IA (Task 07).
 
 ---
@@ -363,6 +372,149 @@ Hoy las tres reglas son `WARN`. `ERROR` queda disponible para controles que deba
 - *Cortes diarios:* generarían versiones por cambios intradiarios de poco valor analítico y una dimensión mucho más grande.
 
 **Consecuencias.** La vigencia desde el inicio del mes implica que el segmento asignado a una operación usa la actividad del mes completo, incluida la posterior a esa operación. Es una convención de "segmento del período"; si se necesitara el segmento exacto al momento de cada operación, harían falta cortes diarios.
+
+---
+
+## DT-017: Fuentes de cotizaciones: data912 + Yahoo Finance
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** La Task 04 pide el precio de mercado de cada operación, con la fuente más adecuada por tipo de instrumento. No hay cuenta en IOL, así que su API no está disponible. Se relevaron dos fuentes gratuitas sobre los 1.445 símbolos del dataset, y se verificó que Databricks Free Edition puede llamarlas.
+
+**Relevamiento (cobertura ponderada por operaciones).**
+
+| Tipo | Ops | Yahoo | data912 | Combinado |
+|---|---|---|---|---|
+| CEDEAR ARS | 47.520 | 87,0% | + 6,5% | ~93% |
+| ACCION ARS | 17.099 | 99,9% | — | 99,9% |
+| BONO ARS / MEP / Cable | 18.974 | 0% | 83-96% | ~87% |
+| CEDEAR y ACCION MEP | 7.483 | 94-97% | 0% | ~95% |
+| LETRA, ON, OPCION, WARRANT | ~8.900 | ~1% | ~1% | ~2% |
+| **Total** | 100.000 | 65,6% | + 19,7% | **~85%** |
+
+**Hallazgos.**
+- **Yahoo ajusta retroactivamente por splits**, incluso con `auto_adjust=False`: SPY 3:1 (29/05/2026) e YPFD 10:1 (03/08/2026). Sin revertirlo, las operaciones de enero en SPY parecerían pagadas un 200% sobre el mercado. Yahoo publica el historial de splits, así que el ajuste es reversible.
+- **data912 publica precios sin ajustar** (SPY: ratio 1,008 contra lo operado) y la renta fija **cada 100 VN** (ratio exacto de 0,01).
+- Yahoo responde **429** a pedidos sin User-Agent de navegador y bajo carga. Con `yfinance` funciona desde Databricks.
+
+**Decisión.**
+| Instrumentos | Fuente primaria | Respaldo |
+|---|---|---|
+| Acciones y CEDEARs ARS | data912 (sin ajustar) | Yahoo, revirtiendo splits |
+| Acciones y CEDEARs MEP (`D`) | Yahoo, revirtiendo splits | — |
+| Bonos ARS, MEP y Cable | data912, ÷ 100 | — |
+| Letras, ONs, opciones, warrants | Sin fuente gratuita: `SIN_COTIZACION` | — |
+
+**Alternativas consideradas.**
+- *Solo Yahoo:* 65,6% de cobertura y ningún instrumento de renta fija.
+- *Solo data912:* no tiene variantes MEP de acciones ni CEDEARs; es un servicio comunitario sin SLA.
+- *API de IOL:* probablemente cubriría todo, pero requiere una cuenta.
+
+**Consecuencias.** ~15% de las operaciones queda sin precio de mercado, y se documenta en la tabla de cobertura. data912 no tiene SLA: si deja de responder, los instrumentos de los que es fuente única quedan sin precio, pero el pipeline sigue (DT-018).
+
+---
+
+## DT-018: Clientes de APIs con una clase abstracta común
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** Cada fuente tiene su propio formato, sus endpoints y su comportamiento ante errores. La consigna pide que el pipeline no falle ante la ausencia de datos para un ticker y que se documente el manejo de errores de la API.
+
+**Decisión.** Paquete `src/integrations/finance/`, **separado de `iol_pipeline`**: los clientes son genéricos y no conocen el pipeline (`iol_pipeline` usa `integrations`, nunca al revés; un test lo verifica). Podrían reutilizarse o extraerse a una librería sin arrastrar el pipeline. La configuración de cómo el pipeline usa cada fuente (tablas, prioridades) vive en `src/iol_pipeline/sources.py` (DT-019).
+- `base.py`: clase abstracta `FinanceClient` con el patrón *template method*. `fetch()` es común: recorre los pedidos, saltea los tipos de instrumento que la fuente no soporta y **convierte cualquier excepción de un símbolo en un error registrado** (`NOT_FOUND`, `EMPTY`, `HTTP`, `TIMEOUT`, `PARSE`, `UNEXPECTED`). Ningún símbolo puede cortar la corrida. Cada subclase implementa `supports`, `ticker_for` y `fetch_symbol`.
+- `http.py`: reintentos con **backoff exponencial** (1 s, 2 s, 4 s...) ante 429, 5xx y timeouts, respetando `Retry-After`. Los errores definitivos (404, otros 4xx) no se reintentan.
+- `data912.py` y `yahoo.py`: un cliente por fuente. **Devuelven las filas en el formato nativo de cada API** (DT-019): en Yahoo, precios ajustados con la columna de splits; en data912, precio por 100 VN y todos sus campos.
+- `fetch()` acepta `max_workers` para hacer pedidos concurrentes, conservando el orden de los resultados. La normalización se hace en Silver, con el mismo criterio de DT-003: si cambia una regla, se reprocesa sin volver a llamar a las APIs.
+- Las dependencias externas se inyectan (`http_get`, `yf_module`, `sleep`), así que los tests simulan las APIs sin red. `yfinance` es una dependencia opcional y se importa solo al crear el cliente de Yahoo.
+
+**Alternativas consideradas.**
+- *Funciones sueltas por fuente:* cada una tendría que repetir el aislamiento de errores y los reintentos.
+- *Normalizar dentro de cada cliente:* mezcla la obtención con reglas de negocio y obliga a volver a llamar a la API para reprocesar.
+
+**Consecuencias.** Sumar una fuente (por ejemplo, la API de IOL) es agregar una subclase de `FinanceClient`.
+
+---
+
+## DT-019: Una tabla Bronze por fuente y registro de fuentes
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** Las cotizaciones llegan de varias APIs con formatos distintos (data912: `o, h, l, c, v, dr, sa`; Yahoo: `Open, ..., Adj Close, Dividends, Stock Splits`), y se espera sumar fuentes en el futuro.
+
+**Decisión.**
+- **Bronze alineado a la fuente:** una tabla por fuente con sus **campos nativos** (`bronze.data912_cotizaciones`, `bronze.yahoo_cotizaciones`). La unificación en un modelo común se hace en Silver. El único cambio sobre el dato nativo es pasar los nombres de Yahoo a snake_case, porque Delta no admite espacios sin column mapping. Si una API agrega campos, Auto Loader los guarda en `_rescued_data`.
+- **Flujo igual al de transacciones:** las respuestas crudas aterrizan como JSON Lines en `landing/raw_files/cotizaciones/{fuente}/extraccion_{ts}.jsonl` y entran con Auto Loader (idempotente por archivo, DT-003). La función de ingesta de Bronze se generalizó para CSV y JSON.
+- **Historia de extracciones:** cada extracción es un archivo nuevo, así que Bronze guarda qué respondió cada API y cuándo (`_extracted_at`). Silver se queda con la última.
+- **Sin llamadas repetidas:** si una fuente ya se extrajo ese día, no se vuelve a llamar a su API, salvo `force_extract`. Re-ejecutar el pipeline no castiga a las fuentes.
+- **`bronze.errores_api` compartida:** no son datos de una fuente sino un registro operativo del pipeline, con el mismo formato para todas. Es la base del monitoreo de la Task 05.
+- **Registro `QUOTE_SOURCES`** (`src/iol_pipeline/sources.py`): cada `QuoteSource` declara su cliente (como *factory*, para no importar `yfinance` hasta usarlo), su tabla Bronze y su schema, sus prioridades por tipo de instrumento y su concurrencia. El notebook recorre el registro.
+
+**Para sumar una fuente:** un cliente (subclase de `FinanceClient`), su tabla en `setup/06_cotizaciones.sql` y su `QuoteSource`. Un test verifica que el schema declarado coincida con el DDL.
+
+**Alternativas consideradas.**
+- *Una tabla Bronze común con columna `fuente`:* no requiere DDL por fuente, pero obliga a convertir al modelo común antes de Bronze, pierde los campos propios de cada API y acopla las fuentes (un cambio de formato en una afecta la tabla de todas).
+- *Escribir directo a Bronze, sin pasar por landing:* es más simple, pero pierde la respuesta cruda como archivo y el mismo mecanismo de idempotencia que el resto del pipeline.
+
+---
+
+## DT-020: Imputación del precio de mercado
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** La consigna pide documentar la estrategia de imputación para operaciones en días sin cotización oficial. Hay dos situaciones distintas:
+1. **La operación cae en un día sin rueda** (sábado o feriado): 10.255 operaciones.
+2. **La operación cae en día hábil, pero el símbolo no cotizó ese día** (instrumentos poco líquidos) o la fuente no tiene ese día.
+
+Las fuentes gratuitas publican precios **diarios** (cierre), no intradiarios.
+
+**Decisión.**
+- **Precio de mercado = cierre de la `fecha_operativa`.** Para el caso 1 ya está resuelto en Silver: `fecha_operativa` es el siguiente día hábil (DT-004), porque una orden cargada un sábado se ejecuta en la rueda del lunes. Se valoriza con el cierre del lunes y queda como `EXACTO`.
+- **Caso 2: último cierre disponible de hasta 5 días hábiles antes** (`IMPUTATION_MAX_BUSINESS_DAYS`), con `tipo_precio = IMPUTADO` y `dias_habiles_desfase` para saber cuán viejo es el precio. La distancia se mide en **días hábiles** con el calendario de feriados, no en días corridos: un fin de semana largo de carnaval no consume la ventana.
+- **Más allá de 5 días hábiles, o sin fuente para el instrumento:** `tipo_precio = SIN_COTIZACION` y precio nulo. La operación se conserva en el hecho, y el análisis la excluye de las métricas de desvío.
+- **Solo hacia atrás:** el cierre posterior a la operación no se usa, porque no estaba disponible al operar.
+- El hecho guarda `precio_mercado`, `fecha_precio_mercado`, `fuente_precio`, `dias_habiles_desfase`, `tipo_precio` y `desvio_vs_mercado_pct`.
+
+**Por qué 5 días hábiles.** Es una semana de rueda: cubre feriados largos y huecos de liquidez puntuales. Con más días, el precio deja de representar al mercado del momento, y en instrumentos volátiles (por ejemplo, con alta inflación en ARS) el desvío medido sería un artefacto de la antigüedad del precio. Queda parametrizado para ajustarlo.
+
+**Alternativas consideradas.**
+- *Interpolar entre el cierre anterior y el posterior:* usa información futura y supone una trayectoria lineal que no existe.
+- *Promedio de la semana:* suaviza, pero mezcla precios posteriores a la operación.
+- *Sin límite de antigüedad:* daría precio a casi todo, pero precios de semanas atrás no sirven para medir si un cliente operó por encima del mercado.
+- *Precio de referencia interno* (mediana de lo operado en el dataset): no es un precio de mercado externo, y mediría a los clientes contra sí mismos.
+
+**Consecuencias.** El cierre diario es una aproximación del precio "al momento de la operación": el desvío medido incluye la variación intradiaria. Por eso las métricas de la Task 06 deben mirar desvíos **sistemáticos** (por cliente o instrumento), no operaciones individuales.
+
+---
+
+## DT-021: `silver.cotizaciones`: normalización y fuente preferida
+
+- **Estado:** Aceptada
+- **Fecha:** 2026-10-16
+
+**Contexto.** Cada fuente publica precios en su propia escala: data912 cotiza la renta fija cada 100 VN, y Yahoo ajusta retroactivamente por splits (DT-017). Además, un mismo símbolo y día puede venir de varias fuentes.
+
+**Decisión.** Una función de conformado por fuente (`CONFORMERS` en `silver_cotizaciones.py`) lleva las filas nativas de Bronze a un modelo común (`simbolo, fecha, fuente, apertura, maximo, minimo, cierre, volumen`):
+- **data912:** `cierre = c × 0,01` en bonos, letras y ONs.
+- **Yahoo:** `cierre = close × producto de los splits posteriores a la fecha`. La fila del día del split ya está en la escala nueva, por eso solo cuentan los estrictamente posteriores.
+- **Yahoo no siempre ajusta la historia.** Informa el split, pero en algunos símbolos no ajusta los precios previos: MIRG informa un 10:1 y sus cierres de enero ya están en la escala original. Revertirlo multiplicaría por 10 un precio correcto. Por eso **se detecta con los datos** (`yahoo_split_events`): si la serie es continua en la fecha del split (salto entre el cierre previo y el del día ≈ 1), Yahoo ajustó la historia y el split se revierte; si el precio salta en el tamaño del factor, no se revierte. La decisión es por cercanía en escala logarítmica. Si falta el cierre de ese día (ETHAD), o el factor es menor a 1,5× (dividendos en acciones de 1-3%, como ITUB o SCCO, cuyo salto se confunde con la variación diaria), se asume ajustado.
+- Se guardan `cierre_fuente` y `factor_ajuste`, así cualquier precio se puede rastrear al dato publicado.
+- **Última extracción:** por (símbolo, fecha), la más reciente. Si un símbolo falló en la última extracción, se conserva el dato anterior: una falla puntual de la API no borra precios.
+- **Fuente preferida:** se conservan **todas las fuentes**, y `es_preferida` marca, por (símbolo, fecha), la de menor prioridad del registro para el tipo de instrumento (DT-019). Si la primaria no tiene ese día, la preferida pasa a ser el respaldo.
+
+**Validaciones** (en el notebook `04_silver_cotizaciones`):
+- **Consistencia entre fuentes:** donde data912 y Yahoo cotizan el mismo símbolo y día, sus cierres normalizados deben coincidir. Ej. YPFD: Yahoo 5.527,5 × 10 (split) = 55.275 frente a 55.300 de data912.
+- **Escala contra lo operado:** la mediana de `precio operado / cierre` por fuente y tipo de instrumento debe dar cerca de 1.
+- **Splits reales:** en los 13 símbolos con splits informados por Yahoo, el cierre corregido queda entre 0,94 y 1,05 del precio operado. Sin la detección, MIRG daba 0,10 y ETHAD 0,32.
+
+**Resultado en la prueba de punta a punta** (muestra de símbolos): desvío mediano contra el mercado de AL30 0,00%, AL30D −0,07%, SPYD −0,08% (con split revertido), YPFD 0,20% y GGAL 0,56%.
+
+**Alternativas consideradas.**
+- *Guardar solo la fuente preferida:* es más simple, pero pierde la validación cruzada y la capacidad de cambiar prioridades sin reprocesar.
+- *Usar `adj_close` de Yahoo:* también ajusta por dividendos, así que no es el precio negociado ese día.
 
 ---
 
