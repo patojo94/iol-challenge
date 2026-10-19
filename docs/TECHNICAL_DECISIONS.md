@@ -33,7 +33,8 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 
 ## Pendientes
 
-- [ ] Escribir el `README.md`: diagrama de arquitectura, instrucciones de reproducción, decisiones con tradeoffs (enlazando este documento), tabla de cobertura de cotizaciones por símbolo y documentación del componente de IA.
+- [x] Escribir el `README.md`: diagrama de arquitectura, instrucciones de reproducción, decisiones con tradeoffs (enlazando este documento) y tabla de cobertura de cotizaciones.
+- [ ] Completar el `README.md` con la comparativa de cómputo (Task 01), el EDA (Task 06) y el componente de IA (Task 07).
 - [x] Definir el mecanismo de idempotencia de la ingesta a Bronze: Auto Loader (DT-003).
 - [x] Definir la ruta del volumen de Unity Catalog donde se aloja el CSV (DT-008).
 - [x] Calibrar el umbral N de desvío de precio contra la mediana (DT-006): N = 10.
@@ -45,7 +46,7 @@ Cada decisión documenta el contexto, la alternativa elegida, las descartadas y 
 - [ ] Confirmar el horario de mercado de BYMA contra la fuente oficial (hoy 11:00 a 17:00 ART en `MARKET_OPEN_HOUR` / `MARKET_CLOSE_HOUR`), incluyendo preapertura y diferencias por segmento (DT-004).
 - [ ] Extender `FERIADOS_AR` si se procesan períodos fuera de ene-mar 2026 (DT-004).
 - [ ] Preguntar a IOL si puede compartir un maestro de clientes (perfil de inversor, fecha de alta) para sumar atributos a `dim_cliente` (DT-007).
-- [ ] Exportar a README la tabla de cobertura de cotizaciones por símbolo (`gold.cobertura_cotizaciones`).
+- [x] Exportar a README la tabla de cobertura de cotizaciones (`gold.cobertura_cotizaciones`).
 - [ ] Task 05: control de frescura de cotizaciones antes de habilitar Gold (última `_extracted_at` de cada fuente). Hoy las precondiciones solo verifican que Bronze no esté vacío, así que correr el 04 sin el 03 procesa una extracción vieja sin avisar.
 - [ ] Clasificar con IA los instrumentos que caen en `ACCION` por descarte (DT-011, Task 07).
 
