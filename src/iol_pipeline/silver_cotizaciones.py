@@ -12,6 +12,7 @@
 La lógica pura (calendario hábil, clasificación del precio) no depende de Spark.
 """
 
+import math
 from datetime import date, timedelta
 
 from iol_pipeline.silver import FERIADOS_AR, is_business_day
@@ -50,6 +51,27 @@ def classify_price(business_days_gap: int | None, max_gap: int = IMPUTATION_MAX_
     if business_days_gap is None or business_days_gap > max_gap:
         return PRICE_MISSING
     return PRICE_EXACT if business_days_gap == 0 else PRICE_IMPUTED
+
+
+# Por debajo de este factor (o de su inversa) el salto de un split no se
+# distingue de la variación diaria normal (ej. dividendos en acciones de 1-3%).
+MIN_DETECTABLE_SPLIT = 1.5
+
+
+def split_was_applied(close_before: float | None, close_on_split_day: float | None, factor: float) -> bool:
+    """Si Yahoo ajustó la historia por un split (DT-021).
+
+    Yahoo informa el split, pero no siempre ajusta los precios previos: SPY e
+    YPFD sí, MIRG no. Si los ajustó, la serie es continua en la fecha del split
+    (salto ≈ 1); si no, el precio salta en el tamaño del factor (salto ≈ factor).
+    Se decide por cercanía en escala logarítmica. Si no se puede decidir (falta
+    un precio, o el factor es tan chico que el salto se confunde con la
+    variación diaria), se asume ajustado, que es el comportamiento habitual.
+    """
+    if not close_before or not close_on_split_day or max(factor, 1 / factor) < MIN_DETECTABLE_SPLIT:
+        return True
+    jump = math.log(close_before / close_on_split_day)
+    return abs(jump) < abs(jump - math.log(factor))
 
 
 def price_deviation_pct(precio: float, precio_mercado: float | None) -> float | None:
@@ -130,6 +152,30 @@ def conform_data912(bronze_df, instrument_types_df):
     return _conformed(df, F.col("o"), F.col("h"), F.col("l"), F.col("c"), F.col("v"), factor, "data912")
 
 
+def yahoo_split_events(bronze_df):
+    """Splits informados por Yahoo y si fueron aplicados a la historia
+    (`split_was_applied`, misma regla en Spark)."""
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    by_date = Window.partitionBy("simbolo").orderBy("date")
+    jump = F.log(F.expr("try_divide(_close_antes, close)"))
+    detectable = F.greatest(F.col("stock_splits"), 1 / F.col("stock_splits")) >= MIN_DETECTABLE_SPLIT
+    # Sin salto calculable o con un factor no detectable, se asume ajustado.
+    applied = F.when(~detectable, F.lit(True)).otherwise(
+        F.coalesce(F.abs(jump) < F.abs(jump - F.log("stock_splits")), F.lit(True))
+    )
+    return (
+        bronze_df.withColumn("_close_antes", F.lag("close").over(by_date))
+        .where((F.col("stock_splits") > 0) & (F.col("stock_splits") != 1))
+        .select(
+            "simbolo", F.col("date").alias("fecha_split"), F.col("stock_splits").alias("factor"),
+            F.round(F.expr("try_divide(_close_antes, close)"), 4).alias("salto_de_precio"),
+            applied.alias("historia_ajustada"),
+        )
+    )
+
+
 def conform_yahoo(bronze_df, instrument_types_df=None):
     """Yahoo ajusta retroactivamente por splits: el precio real de un día es el
     publicado multiplicado por los splits posteriores a ese día.
@@ -137,14 +183,19 @@ def conform_yahoo(bronze_df, instrument_types_df=None):
     Ej. SPY 3:1 el 29/05/2026: el cierre del 05/01/2026 publicado (17.650) x 3
     = 52.950, que es lo que efectivamente cotizaba. La fila del día del split
     ya está en la escala nueva, por eso solo cuentan los splits estrictamente
-    posteriores.
+    posteriores. Solo se revierten los splits que Yahoo efectivamente aplicó a
+    la historia: algunos (MIRG) los informa sin ajustar los precios previos.
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
     df = latest_extraction(bronze_df)
+    applied = yahoo_split_events(df).where("historia_ajustada").select(
+        "simbolo", F.col("fecha_split").alias("date"), F.col("factor").alias("_split_aplicado")
+    )
+    df = df.join(applied, ["simbolo", "date"], "left")
     after = Window.partitionBy("simbolo").orderBy(F.desc("date")).rowsBetween(Window.unboundedPreceding, -1)
-    split = F.when(F.col("stock_splits") > 0, F.col("stock_splits")).otherwise(F.lit(1.0))
+    split = F.coalesce(F.col("_split_aplicado"), F.lit(1.0))
     factor = F.round(F.exp(F.coalesce(F.sum(F.log(split)).over(after), F.lit(0.0))), 6)
     df = df.withColumn("_factor", factor)
     return _conformed(df, F.col("open"), F.col("high"), F.col("low"), F.col("close"), F.col("volume"),
@@ -250,16 +301,20 @@ def match_market_prices(spark, operations_df, quotes_df, max_gap: int = IMPUTATI
     )
 
 
-def coverage_by_symbol(fact_df, dim_instrumento_df, errors_df, sources, processed_at):
+def coverage_by_symbol(fact_df, dim_instrumento_df, errors_df, quotes_df, sources, processed_at):
     """Cobertura de precio de mercado por símbolo, con el motivo cuando falta.
 
-    El motivo sale de la última extracción de cada fuente en `bronze.errores_api`
-    (ej. "data912: NOT_FOUND; yahoo: NOT_FOUND"), o indica que ninguna fuente
-    cubre el tipo de instrumento, o que hubo datos pero no en la ventana hábil.
+    Para un símbolo sin ningún precio, el motivo detalla qué pasó con cada
+    fuente consultada para su tipo de instrumento:
+    - el error de su última extracción (`NOT_FOUND`, `HTTP`...), o
+    - `SIN_DATOS_EN_PERIODO` si la fuente respondió pero sin cierres utilizables
+      (ej. Yahoo devuelve solo la rueda de hoy para algunos CEDEARs).
+    Si ninguna fuente cubre el tipo de instrumento, lo indica.
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
+    spark = fact_df.sparkSession
     covered_types = sorted({tipo for s in sources for tipo in s.priority})
     ops = fact_df.join(dim_instrumento_df.select("instrumento_key", "simbolo", "tipo_instrumento", "tipo_liquidacion"),
                        "instrumento_key")
@@ -271,22 +326,31 @@ def coverage_by_symbol(fact_df, dim_instrumento_df, errors_df, sources, processe
         F.mode("fuente_precio").alias("fuente_principal"),
     )
 
+    # Estado de cada fuente consultada para cada símbolo.
     last = Window.partitionBy("fuente", "simbolo").orderBy(F.desc("_extracted_at"))
-    latest_errors = (
-        errors_df.withColumn("_rn", F.row_number().over(last)).where("_rn = 1")
+    latest_errors = errors_df.withColumn("_rn", F.row_number().over(last)).where("_rn = 1").select("fuente", "simbolo", "error_type")
+    with_data = quotes_df.select("fuente", "simbolo").distinct().withColumn("_con_datos", F.lit(True))
+    requested = (
+        by_symbol.select("simbolo", "tipo_instrumento")
+        .join(F.broadcast(priorities_df(spark, sources)), "tipo_instrumento")
+        .join(latest_errors, ["fuente", "simbolo"], "left")
+        .join(with_data, ["fuente", "simbolo"], "left")
+        .withColumn("_estado", F.coalesce("error_type", F.when(F.col("_con_datos"), F.lit("SIN_DATOS_EN_PERIODO")),
+                                          F.lit("SIN_DATOS")))
         .groupBy("simbolo")
-        .agg(F.concat_ws("; ", F.sort_array(F.collect_list(F.concat_ws(": ", "fuente", "error_type")))).alias("_errores"))
+        .agg(F.concat_ws("; ", F.sort_array(F.collect_list(F.concat_ws(": ", "fuente", "_estado")))).alias("_estado_fuentes"))
     )
+
+    priced = F.col("ops_precio_exacto") + F.col("ops_precio_imputado")
     motivo = (
         F.when(F.col("ops_sin_cotizacion") == 0, F.lit(None))
         .when(~F.col("tipo_instrumento").isin(*covered_types), F.concat(F.lit("Sin fuente para "), F.col("tipo_instrumento")))
-        .when(F.col("_errores").isNotNull() & (F.col("ops_precio_exacto") + F.col("ops_precio_imputado") == 0), F.col("_errores"))
-        .when(F.col("ops_precio_exacto") + F.col("ops_precio_imputado") == 0, F.lit("La fuente no tiene cierres en el período"))
+        .when(priced == 0, F.col("_estado_fuentes"))
         .otherwise(F.lit(f"Sin cierre en los {IMPUTATION_MAX_BUSINESS_DAYS} días hábiles previos a algunas operaciones"))
     )
     return (
-        by_symbol.join(latest_errors, "simbolo", "left")
-        .withColumn("pct_con_precio", F.round(100 * (F.col("ops_precio_exacto") + F.col("ops_precio_imputado")) / F.col("operaciones"), 2))
+        by_symbol.join(requested, "simbolo", "left")
+        .withColumn("pct_con_precio", F.round(100 * priced / F.col("operaciones"), 2))
         .withColumn("motivo_sin_cotizacion", motivo)
         .withColumn("_processed_at", F.lit(processed_at).cast("timestamp"))
         .select(*COVERAGE_COLUMNS)

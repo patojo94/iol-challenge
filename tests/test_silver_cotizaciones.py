@@ -21,6 +21,7 @@ from iol_pipeline.silver_cotizaciones import (
     business_day_index,
     classify_price,
     price_deviation_pct,
+    split_was_applied,
 )
 from iol_pipeline.sources import QUOTE_SOURCES
 
@@ -73,6 +74,22 @@ def test_classify_price(gap, expected):
     assert classify_price(gap) == expected
 
 
+@pytest.mark.parametrize(
+    "before, on_split_day, factor, applied",
+    [
+        (11.78, 11.80, 3.0, True),      # serie continua: Yahoo ajustó la historia (SPY)
+        (21275.0, 2127.5, 10.0, False),  # el precio salta x10: no ajustó (MIRG)
+        (12530.0, 37590.0, 1 / 3, False),  # reverse split sin ajustar: salta /3
+        (12529.0, 12530.0, 1 / 3, True),   # reverse split ajustado (DD)
+        (None, 10.0, 3.0, True),         # sin precio previo: se asume ajustado
+        (10.0, None, 3.0, True),         # sin cierre el día del split (ETHAD): se asume ajustado
+        (8.93, 8.72, 1.03, True),        # factor chico (dividendo en acciones): no se decide sobre ruido
+    ],
+)
+def test_split_was_applied(before, on_split_day, factor, applied):
+    assert split_was_applied(before, on_split_day, factor) is applied
+
+
 def test_price_deviation_pct():
     assert price_deviation_pct(101.0, 100.0) == pytest.approx(1.0)
     assert price_deviation_pct(99.0, 100.0) == pytest.approx(-1.0)
@@ -96,23 +113,48 @@ def _yahoo_row(simbolo, day, close, split=0.0, extracted=T2):
     return (simbolo, f"{simbolo}.BA", day, close, close, close, close, close, 100.0, 0.0, split, extracted, "f")
 
 
-def test_conform_yahoo_reverts_later_splits(spark):
+def test_conform_yahoo_reverts_only_splits_applied_to_history(spark):
     from iol_pipeline.silver_cotizaciones import conform_yahoo
 
     df = spark.createDataFrame([
-        _yahoo_row("SPYD", date(2026, 1, 5), 11.78),               # antes de ambos splits: x3 x2
+        # SPYD: Yahoo ajustó ambos splits, así que la serie publicada es continua.
+        _yahoo_row("SPYD", date(2026, 1, 5), 11.78),               # antes de ambos: x3 x2
+        _yahoo_row("SPYD", date(2026, 5, 28), 12.0),
         _yahoo_row("SPYD", date(2026, 5, 29), 12.0, split=3.0),    # día del split: ya en escala nueva -> x2
-        _yahoo_row("SPYD", date(2026, 8, 3), 6.1, split=2.0),
-        _yahoo_row("SPYD", date(2026, 8, 4), 6.2),                 # después: sin ajuste
+        _yahoo_row("SPYD", date(2026, 7, 31), 12.1),
+        _yahoo_row("SPYD", date(2026, 8, 3), 12.2, split=2.0),
+        _yahoo_row("SPYD", date(2026, 8, 4), 12.3),                # después: sin ajuste
+        # MIRG: Yahoo informa el split pero no ajustó la historia (el precio salta x10).
+        _yahoo_row("MIRG", date(2026, 1, 5), 21275.0),
+        _yahoo_row("MIRG", date(2026, 7, 31), 21000.0),
+        _yahoo_row("MIRG", date(2026, 8, 3), 2100.0, split=10.0),
         _yahoo_row("GGAL", date(2026, 1, 5), 8515.0),              # sin splits
     ], YAHOO_SCHEMA)
     result = {(r.simbolo, r.fecha): (r.cierre, r.factor_ajuste) for r in conform_yahoo(df).collect()}
 
     assert result[("SPYD", date(2026, 1, 5))] == (pytest.approx(70.68), 6.0)
     assert result[("SPYD", date(2026, 5, 29))] == (pytest.approx(24.0), 2.0)
-    assert result[("SPYD", date(2026, 8, 3))] == (pytest.approx(6.1), 1.0)
-    assert result[("SPYD", date(2026, 8, 4))] == (pytest.approx(6.2), 1.0)
+    assert result[("SPYD", date(2026, 8, 3))] == (pytest.approx(12.2), 1.0)
+    assert result[("SPYD", date(2026, 8, 4))] == (pytest.approx(12.3), 1.0)
+    assert result[("MIRG", date(2026, 1, 5))] == (pytest.approx(21275.0), 1.0)  # no se multiplica x10
     assert result[("GGAL", date(2026, 1, 5))] == (pytest.approx(8515.0), 1.0)
+
+
+def test_yahoo_split_events_report_detection(spark):
+    from iol_pipeline.silver_cotizaciones import yahoo_split_events
+
+    df = spark.createDataFrame([
+        _yahoo_row("MIRG", date(2026, 7, 31), 21000.0),
+        _yahoo_row("MIRG", date(2026, 8, 3), 2100.0, split=10.0),
+        _yahoo_row("SPYD", date(2026, 5, 28), 12.0),
+        _yahoo_row("SPYD", date(2026, 5, 29), 12.0, split=3.0),
+        _yahoo_row("ETHAD", date(2026, 10, 5), 10.1),
+        _yahoo_row("ETHAD", date(2026, 10, 6), None, split=1 / 3),   # sin cierre el día del split
+        _yahoo_row("ITUBD", date(2025, 12, 26), 8.93),
+        _yahoo_row("ITUBD", date(2025, 12, 29), 8.72, split=1.03),   # factor chico
+    ], YAHOO_SCHEMA)
+    events = {r.simbolo: (r.salto_de_precio, r.historia_ajustada) for r in yahoo_split_events(df).collect()}
+    assert events == {"MIRG": (10.0, False), "SPYD": (1.0, True), "ETHAD": (None, True), "ITUBD": (1.0241, True)}
 
 
 def test_conform_data912_scales_fixed_income_only(spark):
@@ -196,3 +238,27 @@ def test_match_market_prices_exact_imputed_and_missing(spark):
     assert (result["T4"].tipo_precio, result["T4"].precio_mercado, result["T4"].fuente_precio) == (PRICE_MISSING, None, None)
     assert result["T5"].tipo_precio == PRICE_MISSING
     assert len(result) == 5  # una fila por operación, sin duplicar
+
+
+def test_coverage_reason_lists_each_requested_source(spark):
+    from iol_pipeline.silver_cotizaciones import coverage_by_symbol
+
+    now = datetime(2026, 10, 16)
+    dim = spark.createDataFrame([
+        (1, "VIST", "CEDEAR", "ARS"), (2, "S17A6", "LETRA", "ARS"), (3, "GFGC79054F", "OPCION", "ARS"), (4, "GGAL", "ACCION", "ARS"),
+    ], "instrumento_key BIGINT, simbolo STRING, tipo_instrumento STRING, tipo_liquidacion STRING")
+    fact = spark.createDataFrame([
+        (1, PRICE_MISSING, None), (2, PRICE_MISSING, None), (3, PRICE_MISSING, None),
+        (4, PRICE_EXACT, "data912"), (4, PRICE_MISSING, None),
+    ], "instrumento_key BIGINT, tipo_precio STRING, fuente_precio STRING")
+    errors = spark.createDataFrame([
+        ("VIST", "VIST", "data912", "NOT_FOUND", "x", now), ("S17A6", "S17A6", "data912", "NOT_FOUND", "x", now),
+    ], "simbolo STRING, ticker STRING, fuente STRING, error_type STRING, message STRING, _extracted_at TIMESTAMP")
+    quotes = spark.createDataFrame([("yahoo", "VIST"), ("data912", "GGAL")], "fuente STRING, simbolo STRING")
+
+    rows = {r.simbolo: r for r in coverage_by_symbol(fact, dim, errors, quotes, QUOTE_SOURCES, now).collect()}
+    assert rows["VIST"].motivo_sin_cotizacion == "data912: NOT_FOUND; yahoo: SIN_DATOS_EN_PERIODO"
+    assert rows["S17A6"].motivo_sin_cotizacion == "data912: NOT_FOUND"
+    assert rows["GFGC79054F"].motivo_sin_cotizacion == "Sin fuente para OPCION"
+    assert rows["GGAL"].motivo_sin_cotizacion.startswith("Sin cierre en los 5 días hábiles")
+    assert (rows["GGAL"].pct_con_precio, rows["GGAL"].fuente_principal) == (50.0, "data912")
